@@ -10,6 +10,9 @@ DEVICE_STATUS = ("planned", "active", "retired")
 LOCATION_KINDS = ("building", "floor", "room", "rack")
 PORT_MEDIA = ("RJ45", "SFP", "SFP+", "SFP28", "QSFP", "LWL", "other")
 SOURCES = ("manual", "csv", "json", "api", "checkmk", "openplan")
+CABLE_TYPES = ("Cat5e", "Cat6", "Cat6A", "Cat7", "Cat7A",
+               "LWL-SM-OS2", "LWL-MM-OM3", "LWL-MM-OM4", "LWL-MM-OM5",
+               "DAC", "AOC", "other")
 
 
 class SiteIn(BaseModel):
@@ -53,16 +56,70 @@ class PortIn(BaseModel):
 
 
 class PortBulkIn(BaseModel):
-    """Mehrere Ports auf einmal anlegen, z. B. prefix=\"Gi1/0/\", start=1, count=48."""
+    """Mehrere Ports anlegen. dual=True legt je einen Vorder- und Rückseiten-Port an und setzt automatisch den Peer."""
     prefix: str = Field(min_length=1, max_length=48)
     start: int = Field(default=1, ge=0)
     count: int = Field(ge=1, le=512)
     medium: str = "RJ45"
     speed_mbps: Optional[int] = Field(default=None, ge=0)
+    dual: bool = False
+    back_suffix: str = Field(default="-back", max_length=16)
 
 
 class PeerIn(BaseModel):
     peer_port_id: Optional[int] = None          # None = Durchschleifung lösen
+
+
+class CableIn(BaseModel):
+    port_b_id: Optional[int] = None             # None = Kabel/Verbindung lösen
+    cable_label: str = ""
+    cable_type: str = "other"
+    fiber_count: Optional[int] = Field(default=None, ge=1)
+    length_m: Optional[float] = Field(default=None, ge=0)
+    color: str = ""
+    installed_at: Optional[str] = None          # ISO-Datum YYYY-MM-DD
+    measurement_ref: str = ""
+    measurement_ok: Optional[bool] = None       # None=nicht gemessen, True=bestanden, False=nicht bestanden
+    note: str = ""
+
+
+WORKORDER_STATUSES = ("draft", "submitted", "approved", "rejected", "in_progress", "done", "confirmed", "rework")
+WORKITEM_ACTIONS   = ("connect", "disconnect", "move")
+WORKITEM_STATUSES  = ("open", "done", "deviation")
+PRIORITIES         = ("low", "normal", "high", "critical")
+
+
+class WorkOrderIn(BaseModel):
+    title:           str = Field(min_length=1, max_length=200)
+    description:     str = ""
+    priority:        str = "normal"
+    location_id:     Optional[int] = None
+    planned_from:    Optional[str] = None   # YYYY-MM-DD
+    planned_to:      Optional[str] = None
+    note:            str = ""
+    openplan_project: str = ""
+    openplan_task:   str = ""
+    openplan_link:   str = ""
+
+
+class WorkItemIn(BaseModel):
+    action:       str = "connect"           # connect | disconnect | move
+    port_a_id:    Optional[int] = None
+    port_b_id:    Optional[int] = None
+    old_port_b_id: Optional[int] = None     # nur bei move: alter Zielport
+    cable_label:  str = ""
+    cable_type:   str = "other"
+    fiber_count:  Optional[int] = Field(default=None, ge=1)
+    length_m:     Optional[float] = Field(default=None, ge=0)
+    color:        str = ""
+    note:         str = ""
+    idx:          int = 0
+
+
+class WorkItemExec(BaseModel):
+    """Techniker hakt eine Position ab."""
+    item_status:    str = "done"            # done | deviation
+    deviation_note: str = ""
 
 
 class UserCreate(BaseModel):

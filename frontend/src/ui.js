@@ -17,6 +17,7 @@ export const DEVICE_TYPES = [
 export const DEVICE_STATUS = [['planned', 'geplant'], ['active', 'aktiv'], ['retired', 'außer Betrieb']]
 export const LOCATION_KINDS = [['building', 'Gebäude'], ['floor', 'Etage'], ['room', 'Raum'], ['rack', 'Rack']]
 export const PORT_MEDIA = ['RJ45', 'SFP', 'SFP+', 'SFP28', 'QSFP', 'LWL', 'other']
+export const CABLE_TYPES = ['Cat5e', 'Cat6', 'Cat6A', 'Cat7', 'Cat7A', 'LWL-SM-OS2', 'LWL-MM-OM3', 'LWL-MM-OM4', 'LWL-MM-OM5', 'DAC', 'AOC', 'other']
 export const SOURCES = [['manual', 'manuell'], ['csv', 'CSV'], ['json', 'JSON'], ['api', 'API'], ['checkmk', 'Checkmk'], ['openplan', 'OpenPlan']]
 export const ROLES = [
   ['admin', 'Administrator', 'darf alles'], ['planer', 'Planer', 'erstellt und reicht Patchaufträge ein'],

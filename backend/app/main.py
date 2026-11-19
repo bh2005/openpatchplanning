@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import auth
 from .config import settings
-from .routers import accounts, imports, masterdata, overview
+from .routers import accounts, imports, masterdata, overview, workorders
 from .static import find_static_dir, register_static
 
 logger = logging.getLogger("opp")
@@ -31,6 +31,7 @@ app.include_router(accounts.router)
 app.include_router(masterdata.router)
 app.include_router(imports.router)
 app.include_router(overview.router)
+app.include_router(workorders.router)
 
 
 @app.on_event("startup")

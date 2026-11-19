@@ -49,7 +49,8 @@
         <div v-else class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead><tr class="bg-slate-50 dark:bg-slate-700/40"><th :class="th">Name</th><th :class="th">Medium</th><th :class="th">Geschw.</th><th :class="th">Beschreibung</th>
-              <th :class="th">Status</th><th v-if="d.type === 'patchpanel'" :class="th">Gegenseite</th><th v-if="canWrite" :class="th"></th></tr></thead>
+              <th :class="th">Status</th><th v-if="d.type === 'patchpanel'" :class="th">Gegenseite</th>
+              <th :class="th">Verbunden mit</th><th v-if="canWrite" :class="th"></th></tr></thead>
             <tbody>
               <tr v-for="p in d.ports" :key="p.id" class="border-t border-slate-100 dark:border-slate-700">
                 <td :class="td" class="font-mono text-xs">{{ p.name }}</td>
@@ -57,10 +58,21 @@
                 <td :class="td">{{ fmtSpeed(p.speed_mbps) }}</td>
                 <td :class="td" class="text-slate-500">{{ p.description || '–' }}</td>
                 <td :class="td"><span :class="linkClass(p.oper_status)">{{ p.oper_status || '–' }}</span></td>
-                <td v-if="d.type === 'patchpanel'" :class="td" class="text-xs">{{ p.peer_port_id ? `Port #${p.peer_port_id}` : '–' }}</td>
+                <td v-if="d.type === 'patchpanel'" :class="td" class="text-xs font-mono">{{ p.peer_port_name || (p.peer_port_id ? `#${p.peer_port_id}` : '–') }}</td>
+                <td :class="td" class="text-xs">
+                  <router-link v-if="p.cable" :to="`/devices/${p.cable.device_id}`"
+                    class="text-ks-600 dark:text-ks-400 hover:underline font-mono">
+                    {{ p.cable.device_hostname }}:{{ p.cable.port_name }}
+                  </router-link>
+                  <span v-if="p.cable && p.cable.cable_label" class="ml-1 text-slate-400">({{ p.cable.cable_label }})</span>
+                  <span v-if="p.cable && p.cable.measurement_ok === true" class="ml-1 text-green-500" title="Messung bestanden">✓</span>
+                  <span v-if="p.cable && p.cable.measurement_ok === false" class="ml-1 text-red-500" title="Messung nicht bestanden">✗</span>
+                  <span v-if="!p.cable" class="text-slate-400">–</span>
+                </td>
                 <td v-if="canWrite" :class="td" class="text-right whitespace-nowrap">
                   <button :class="btnLink" @click="openPort(p)">Bearbeiten</button>
                   <button v-if="d.type === 'patchpanel'" :class="btnLink" class="ml-3" @click="openPeer(p)">Gegenseite</button>
+                  <button :class="btnLink" class="ml-3" @click="openLink(p)">Verbindung</button>
                   <button :class="btnDanger" class="ml-3" @click="removePort(p)">Löschen</button>
                 </td>
               </tr>
@@ -84,17 +96,95 @@
     </ModalDialog>
 
     <ModalDialog v-if="bulk" title="Mehrere Ports anlegen" :error="formError" @close="bulk = null">
-      <p class="text-xs text-slate-400">Beispiel: Präfix <code>Gi1/0/</code>, Start 1, Anzahl 48 legt Gi1/0/1 bis Gi1/0/48 an.</p>
+      <p class="text-xs text-slate-400 mb-1">Beispiel: Präfix <code>Port </code>, Start 1, Anzahl 24 legt Port 1–24 an.</p>
       <div class="grid grid-cols-3 gap-3">
         <div><label :class="lbl">Präfix</label><input v-model="bulk.prefix" :class="inp" /></div>
         <div><label :class="lbl">Start</label><input v-model.number="bulk.start" type="number" min="0" :class="inp" /></div>
         <div><label :class="lbl">Anzahl</label><input v-model.number="bulk.count" type="number" min="1" max="512" :class="inp" /></div>
         <div><label :class="lbl">Medium</label><select v-model="bulk.medium" :class="inp"><option v-for="m in PORT_MEDIA" :key="m">{{ m }}</option></select></div>
         <div><label :class="lbl">Mbit/s</label><input v-model.number="bulk.speed_mbps" type="number" min="0" :class="inp" /></div>
+        <div class="flex flex-col gap-1">
+          <label :class="lbl">Dual (Vorder-/Rückseite) <HelpHint text="Legt pro Port-Nummer zwei Ports an (z.B. &#x27;Port 1&#x27; und &#x27;Port 1-back&#x27;) und verbindet sie automatisch als Peer (Durchschleifung). Ideal für Patchfelder und Datendosen." /></label>
+          <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" v-model="bulk.dual" class="rounded" />
+            Vorder- und Rückseite anlegen
+          </label>
+        </div>
+        <div v-if="bulk.dual"><label :class="lbl">Rückseiten-Suffix</label><input v-model="bulk.back_suffix" :class="inp" placeholder="-back" /></div>
       </div>
+      <p v-if="bulk.dual" class="text-xs text-ks-600 dark:text-ks-400 mt-1">
+        Legt {{ bulk.count * 2 }} Ports an: z.B. <code>{{ bulk.prefix }}{{ bulk.start }}</code> + <code>{{ bulk.prefix }}{{ bulk.start }}{{ bulk.back_suffix || '-back' }}</code> (automatisch gepeert)
+      </p>
       <template #footer>
         <button @click="bulk = null" :class="btnGhost">Abbrechen</button>
         <button @click="saveBulk" :class="btnPrimary" :disabled="!bulk.prefix || !bulk.count">Anlegen</button>
+      </template>
+    </ModalDialog>
+
+    <ModalDialog v-if="cableForm" :title="`Kabel an ${cableForm.port.name}`" :error="formError" @close="cableForm = null">
+      <div class="space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div class="col-span-2"><label :class="lbl">Zielgerät</label>
+            <select v-model="cableForm.deviceId" :class="inp" @change="loadCablePorts">
+              <option :value="null">(Verbindung lösen)</option>
+              <option v-for="o in cableForm.devices" :key="o.id" :value="o.id">{{ o.hostname }}</option>
+            </select>
+          </div>
+          <div v-if="cableForm.deviceId" class="col-span-2"><label :class="lbl">Zielport</label>
+            <select v-model="cableForm.portId" :class="inp">
+              <option :value="null">(Port wählen)</option>
+              <option v-for="p in cableForm.ports" :key="p.id" :value="p.id">
+                {{ p.name }}{{ p.cable ? ` ← belegt: ${p.cable.device_hostname}:${p.cable.port_name}` : '' }}
+              </option>
+            </select>
+          </div>
+        </div>
+        <hr class="border-slate-200 dark:border-slate-700" />
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Kabeldetails</p>
+        <div class="grid grid-cols-2 gap-3">
+          <div><label :class="lbl">Kabelnummer / Label</label>
+            <input v-model="cableForm.cable_label" :class="inp" placeholder="z.B. K-EG-001" />
+          </div>
+          <div><label :class="lbl">Kabeltyp</label>
+            <select v-model="cableForm.cable_type" :class="inp">
+              <option v-for="t in CABLE_TYPES" :key="t" :value="t">{{ t }}</option>
+            </select>
+          </div>
+          <div v-if="cableForm.cable_type.startsWith('LWL')">
+            <label :class="lbl">Faseranzahl</label>
+            <input v-model.number="cableForm.fiber_count" type="number" min="1" :class="inp" placeholder="z.B. 4" />
+          </div>
+          <div><label :class="lbl">Länge (m)</label>
+            <input v-model.number="cableForm.length_m" type="number" min="0" step="0.5" :class="inp" placeholder="z.B. 15.5" />
+          </div>
+          <div><label :class="lbl">Farbe</label>
+            <input v-model="cableForm.color" :class="inp" placeholder="z.B. blau" />
+          </div>
+          <div><label :class="lbl">Verlegt am</label>
+            <input v-model="cableForm.installed_at" type="date" :class="inp" />
+          </div>
+        </div>
+        <hr class="border-slate-200 dark:border-slate-700" />
+        <p class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Messprotokoll</p>
+        <div class="grid grid-cols-2 gap-3">
+          <div><label :class="lbl">Protokoll-Nr. / Referenz</label>
+            <input v-model="cableForm.measurement_ref" :class="inp" placeholder="z.B. FLUKE-2024-001" />
+          </div>
+          <div><label :class="lbl">Messergebnis</label>
+            <select v-model="cableForm.measurement_ok" :class="inp">
+              <option :value="null">– nicht gemessen –</option>
+              <option :value="true">✓ Bestanden</option>
+              <option :value="false">✗ Nicht bestanden</option>
+            </select>
+          </div>
+        </div>
+        <div><label :class="lbl">Notiz</label>
+          <input v-model="cableForm.note" :class="inp" placeholder="Freitext" />
+        </div>
+      </div>
+      <template #footer>
+        <button @click="cableForm = null" :class="btnGhost">Abbrechen</button>
+        <button @click="saveCable" :class="btnPrimary" :disabled="cableForm.deviceId !== null && !cableForm.portId">Speichern</button>
       </template>
     </ModalDialog>
 
@@ -121,14 +211,14 @@ import ModalDialog from '../components/ModalDialog.vue'
 import HelpHint from '../components/HelpHint.vue'
 import { api, errText, isAdmin } from '../api.js'
 import { inp, lbl, card, th, td, btnPrimary, btnGhost, btnDanger, btnLink, DEVICE_TYPES, DEVICE_STATUS, PORT_MEDIA,
-         typeLabel, sourceLabel, fmtSpeed, linkClass } from '../ui.js'
+         CABLE_TYPES, typeLabel, sourceLabel, fmtSpeed, linkClass } from '../ui.js'
 
 const route = useRoute(), router = useRouter()
 const canWrite = isAdmin()
 const d = ref(null), locations = ref([])
 const form = reactive({})
 const error = ref(''), msg = ref(''), msgErr = ref(false), formError = ref('')
-const portForm = ref(null), bulk = ref(null), peer = ref(null)
+const portForm = ref(null), bulk = ref(null), peer = ref(null), cableForm = ref(null)
 
 const FIELDS = ['hostname', 'type', 'vendor', 'model', 'serial', 'mgmt_ip', 'location_id', 'rack_position', 'height_u', 'status', 'note']
 
@@ -168,10 +258,55 @@ async function removePort(p) {
   try { await api.deletePort(p.id); await load() } catch (e) { error.value = errText(e) }
 }
 
-function openBulk() { formError.value = ''; bulk.value = { prefix: '', start: 1, count: 24, medium: 'RJ45', speed_mbps: null } }
+function openBulk() { formError.value = ''; bulk.value = { prefix: '', start: 1, count: 24, medium: 'RJ45', speed_mbps: null, dual: false, back_suffix: '-back' } }
 async function saveBulk() {
-  try { await api.bulkPorts(d.value.id, { ...bulk.value, speed_mbps: bulk.value.speed_mbps || null }); bulk.value = null; await load() }
-  catch (e) { formError.value = errText(e) }
+  try {
+    await api.bulkPorts(d.value.id, { ...bulk.value, speed_mbps: bulk.value.speed_mbps || null })
+    bulk.value = null; await load()
+  } catch (e) { formError.value = errText(e) }
+}
+
+function _emptyCable() {
+  return { cable_label: '', cable_type: 'other', fiber_count: null, length_m: null,
+           color: '', installed_at: null, measurement_ref: '', measurement_ok: null, note: '' }
+}
+async function openLink(p) {
+  formError.value = ''
+  const r = await api.devices({ limit: 1000 })
+  const devices = r.items.filter(o => o.id !== d.value.id)
+  const currentDeviceId = p.cable ? p.cable.device_id : null
+  let ports = []
+  if (currentDeviceId) {
+    const dev = await api.device(currentDeviceId)
+    ports = dev.ports.filter(x => x.id !== p.id)
+  }
+  cableForm.value = {
+    port: p, devices, ports,
+    deviceId: currentDeviceId,
+    portId: p.cable ? p.cable.port_id : null,
+    ...(p.cable ? {
+      cable_label: p.cable.cable_label, cable_type: p.cable.cable_type || 'other',
+      fiber_count: p.cable.fiber_count, length_m: p.cable.length_m, color: p.cable.color,
+      installed_at: p.cable.installed_at, measurement_ref: p.cable.measurement_ref,
+      measurement_ok: p.cable.measurement_ok, note: p.cable.note,
+    } : _emptyCable()),
+  }
+}
+async function loadCablePorts() {
+  cableForm.value.portId = null
+  if (cableForm.value.deviceId) {
+    const dev = await api.device(cableForm.value.deviceId)
+    cableForm.value.ports = dev.ports.filter(x => x.id !== cableForm.value.port.id)
+  } else {
+    cableForm.value.ports = []
+  }
+}
+async function saveCable() {
+  try {
+    const { port, devices, ports, deviceId, portId, ...cableFields } = cableForm.value
+    await api.setCable(port.id, { port_b_id: portId, ...cableFields })
+    cableForm.value = null; await load()
+  } catch (e) { formError.value = errText(e) }
 }
 
 async function openPeer(p) {

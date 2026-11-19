@@ -73,6 +73,23 @@ export const api = {
   updatePort:   (id, b) => put(`/api/ports/${id}`, b),
   deletePort:   id => del(`/api/ports/${id}`),
   setPeer:      (id, peer_port_id) => put(`/api/ports/${id}/peer`, { peer_port_id }),
+  setCable:     (id, body) => put(`/api/ports/${id}/cable`, body),
+  cables:       params => get('/api/cables', params),
+  updateCable:  (id, body) => put(`/api/cables/${id}`, body),
+
+  // Patchaufträge
+  workorders:        params => get('/api/workorders', params),
+  workorder:         id => get(`/api/workorders/${id}`),
+  createWorkorder:   b => post('/api/workorders', b),
+  updateWorkorder:   (id, b) => put(`/api/workorders/${id}`, b),
+  deleteWorkorder:   id => del(`/api/workorders/${id}`),
+  workorderTransition: (id, action) => post(`/api/workorders/${id}/transition/${action}`),
+  workorderItems:    id => get(`/api/workorders/${id}/items`),
+  addWorkitem:       (wid, b) => post(`/api/workorders/${wid}/items`, b),
+  updateWorkitem:    (wid, iid, b) => put(`/api/workorders/${wid}/items/${iid}`, b),
+  deleteWorkitem:    (wid, iid) => del(`/api/workorders/${wid}/items/${iid}`),
+  executeWorkitem:   (wid, iid, b) => post(`/api/workorders/${wid}/items/${iid}/execute`, b),
+  reopenWorkitem:    (wid, iid) => post(`/api/workorders/${wid}/items/${iid}/reopen`),
 
   // Import
   importFields:   () => get('/api/import/fields'),

@@ -10,7 +10,9 @@ import Racks from './views/Racks.vue'
 import ImportView from './views/ImportView.vue'
 import Admin from './views/Admin.vue'
 import Help from './views/Help.vue'
-import { isLoggedIn, isAdmin } from './api.js'
+import WorkOrderList from './views/WorkOrderList.vue'
+import WorkOrderDetail from './views/WorkOrderDetail.vue'
+import { isLoggedIn, isAdmin, hasRole } from './api.js'
 import { helpContext } from './content/helpContext.js'
 import './style.css'
 
@@ -24,6 +26,8 @@ const router = createRouter({
     { path: '/devices',     component: Devices },
     { path: '/devices/:id', component: DeviceDetail },
     { path: '/racks',       component: Racks },
+    { path: '/workorders',    component: WorkOrderList },
+    { path: '/workorders/:id', component: WorkOrderDetail },
     { path: '/import',      component: ImportView, meta: { admin: true } },
     { path: '/admin',       component: Admin, meta: { admin: true } },
     { path: '/handbuch',    component: Help },

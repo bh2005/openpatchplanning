@@ -22,6 +22,12 @@
         <div><label :class="lbl">Art</label>
           <select v-model="csv.kind" :class="inp" class="!w-40" @change="resetCsv"><option value="devices">Geräte</option><option value="ports">Ports</option></select></div>
         <div><label :class="lbl">CSV-Datei</label><input type="file" accept=".csv,.txt,text/csv" @change="pickCsv" class="text-sm" /></div>
+        <div class="flex items-end">
+          <a :href="`/api/import/template/${csv.kind}`" :download="`opp_template_${csv.kind}.csv`"
+             class="text-xs px-3 py-1.5 rounded border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700">
+            ↓ Vorlage herunterladen
+          </a>
+        </div>
       </div>
       <template v-if="csv.preview">
         <p class="text-xs text-slate-400">{{ csv.preview.rows }} Zeilen erkannt. Ordne den Feldern Spalten zu:</p>

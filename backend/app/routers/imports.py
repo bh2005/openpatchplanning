@@ -1,10 +1,12 @@
 """Import-Schnittstellen: CSV (mit Spaltenzuordnung), JSON und API. Alle Wege nutzen app.importer."""
 from __future__ import annotations
 
+import io
 import json
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import audit, checkmk, db, importer
@@ -30,6 +32,47 @@ def _source(p: Principal, explicit: Optional[str]) -> str:
             raise HTTPException(400, "source muss json, api, checkmk oder openplan sein")
         return explicit
     return "api" if p.kind == "token" else "json"
+
+
+_CSV_TEMPLATES: dict[str, tuple[list[str], list[list[str]]]] = {
+    "devices": (
+        importer.DEVICE_FIELDS,
+        [
+            ["sw-fra-core-01", "switch", "Cisco", "Catalyst 9300-48P", "FCW1234ABC", "10.0.0.10",
+             "FRA/Gebäude A/Serverraum EG/Rack A-01", "active", "Core-Switch", ""],
+            ["fw-fra-01", "firewall", "Fortinet", "FortiGate 200F", "FG200F9876", "10.0.0.1",
+             "FRA/Gebäude A/Serverraum EG/Rack A-01", "active", "Firewall", ""],
+            ["srv-fra-01", "server", "Dell", "PowerEdge R740", "DELLSRV001", "10.0.1.10",
+             "FRA/Gebäude A/Serverraum EG/Rack A-01", "active", "", "asset-1001"],
+        ],
+    ),
+    "ports": (
+        importer.PORT_FIELDS,
+        [
+            ["sw-fra-core-01", "GigabitEthernet1/0/1", "1", "RJ45", "1000", "Uplink zu PP", "", "up"],
+            ["sw-fra-core-01", "GigabitEthernet1/0/2", "2", "RJ45", "1000", "", "", "up"],
+            ["srv-fra-01", "eth0", "0", "RJ45", "1000", "Management", "", "up"],
+        ],
+    ),
+}
+
+
+@router.get("/template/{kind}")
+def csv_template(kind: str):
+    """Liefert eine CSV-Vorlage mit Beispieldaten zum Herunterladen."""
+    if kind not in _CSV_TEMPLATES:
+        raise HTTPException(400, "kind muss devices oder ports sein")
+    headers, rows = _CSV_TEMPLATES[kind]
+    buf = io.StringIO()
+    buf.write(";".join(headers) + "\n")
+    for row in rows:
+        buf.write(";".join(str(c) for c in row) + "\n")
+    content = buf.getvalue().encode("utf-8-sig")  # BOM für Excel
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="opp_template_{kind}.csv"'},
+    )
 
 
 @router.get("/fields")

@@ -32,4 +32,8 @@ def stats(_: Principal = Depends(current_principal)):
         "devices_by_status": _count_by("status"),
         "devices_by_source": _count_by("source"),
         "last_imports": runs,
+        "cables": db.row("SELECT COUNT(*) AS n FROM cables")["n"],
+        "cables_measured": db.row("SELECT COUNT(*) AS n FROM cables WHERE measurement_ok IS NOT NULL")["n"],
+        "cables_passed": db.row("SELECT COUNT(*) AS n FROM cables WHERE measurement_ok = 1")["n"],
+        "cables_failed": db.row("SELECT COUNT(*) AS n FROM cables WHERE measurement_ok = 0")["n"],
     }

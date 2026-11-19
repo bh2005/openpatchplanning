@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .. import audit, db
 from ..auth import Principal, current_principal, require_master_write
-from ..schemas import (DEVICE_STATUS, DEVICE_TYPES, LOCATION_KINDS, PORT_MEDIA, DeviceIn, LocationIn, PeerIn,
-                       PortBulkIn, PortIn, SiteIn)
+from ..schemas import (CABLE_TYPES, DEVICE_STATUS, DEVICE_TYPES, LOCATION_KINDS, PORT_MEDIA, CableIn, DeviceIn,
+                       LocationIn, PeerIn, PortBulkIn, PortIn, SiteIn)
 
 router = APIRouter(prefix="/api", tags=["stammdaten"])
 
@@ -230,7 +230,7 @@ def get_device(did: int, _: Principal = Depends(current_principal)):
     if not d:
         raise HTTPException(404, "Gerät nicht gefunden")
     d = _device_out(d)
-    d["ports"] = sort_ports(db.rows("SELECT * FROM ports WHERE device_id = ?", (did,)))
+    d["ports"] = sort_ports(_ports_with_cables(db.rows("SELECT * FROM ports WHERE device_id = ?", (did,))))
     return d
 
 
@@ -283,11 +283,56 @@ def _check_port(body: PortIn) -> None:
     _one_of(body.medium, PORT_MEDIA, "Medium")
 
 
+def _port_with_cable(port: dict) -> dict:
+    """Reichert einen Port-Dict mit Kabel-Info und Peer-Name an."""
+    out = dict(port)
+    if port.get("peer_port_id"):
+        peer = db.row("SELECT name FROM ports WHERE id = ?", (port["peer_port_id"],))
+        out["peer_port_name"] = peer["name"] if peer else None
+    else:
+        out["peer_port_name"] = None
+    cable = db.row(
+        """SELECT c.*,
+                  CASE WHEN c.port_a_id = :pid THEN c.port_b_id ELSE c.port_a_id END AS other_port_id
+           FROM cables c WHERE c.port_a_id = :pid OR c.port_b_id = :pid""",
+        {"pid": port["id"]}
+    )
+    if cable:
+        other = db.row(
+            """SELECT p.id, p.name, p.device_id, d.hostname
+               FROM ports p JOIN devices d ON d.id = p.device_id WHERE p.id = ?""",
+            (cable["other_port_id"],)
+        )
+        out["cable"] = {
+            "id": cable["id"],
+            "cable_label": cable["cable_label"],
+            "cable_type": cable["cable_type"],
+            "fiber_count": cable["fiber_count"],
+            "length_m": cable["length_m"],
+            "color": cable["color"],
+            "installed_at": cable["installed_at"],
+            "measurement_ref": cable["measurement_ref"],
+            "measurement_ok": None if cable["measurement_ok"] is None else bool(cable["measurement_ok"]),
+            "note": cable["note"],
+            "port_id": other["id"],
+            "port_name": other["name"],
+            "device_id": other["device_id"],
+            "device_hostname": other["hostname"],
+        }
+    else:
+        out["cable"] = None
+    return out
+
+
+def _ports_with_cables(ports: list[dict]) -> list[dict]:
+    return [_port_with_cable(p) for p in ports]
+
+
 @router.get("/devices/{did}/ports")
 def list_ports(did: int, _: Principal = Depends(current_principal)):
     if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
         raise HTTPException(404, "Gerät nicht gefunden")
-    return sort_ports(db.rows("SELECT * FROM ports WHERE device_id = ?", (did,)))
+    return sort_ports(_ports_with_cables(db.rows("SELECT * FROM ports WHERE device_id = ?", (did,))))
 
 
 @router.post("/devices/{did}/ports", status_code=201)
@@ -304,24 +349,39 @@ def create_port(did: int, body: PortIn, me: Principal = Depends(require_master_w
     except sqlite3.IntegrityError:
         raise HTTPException(409, f"Der Port '{body.name}' existiert an diesem Gerät bereits")
     audit.log(me.name, "port.create", "port", pid, f"device {did}: {body.name}")
-    return db.row("SELECT * FROM ports WHERE id = ?", (pid,))
+    return _port_with_cable(db.row("SELECT * FROM ports WHERE id = ?", (pid,)))
 
 
 @router.post("/devices/{did}/ports/bulk", status_code=201)
 def create_ports_bulk(did: int, body: PortBulkIn, me: Principal = Depends(require_master_write)):
-    """Legt count Ports an: <prefix><start> … <prefix><start+count-1>. Bereits vorhandene Namen werden übersprungen."""
+    """Legt count Ports an. dual=True erzeugt je einen Vorder- (<prefix><n>) und Rückseiten-Port (<prefix><n><back_suffix>)
+    und setzt automatisch den Peer zwischen beiden."""
     if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
         raise HTTPException(404, "Gerät nicht gefunden")
     _one_of(body.medium, PORT_MEDIA, "Medium")
     created = skipped = 0
     for i in range(body.start, body.start + body.count):
+        front_name = f"{body.prefix}{i}"
         try:
-            db.execute("INSERT INTO ports(device_id, name, idx, medium, speed_mbps) VALUES (?,?,?,?,?)",
-                       (did, f"{body.prefix}{i}", i, body.medium, body.speed_mbps))
+            front_id = db.execute("INSERT INTO ports(device_id, name, idx, medium, speed_mbps) VALUES (?,?,?,?,?)",
+                                  (did, front_name, i, body.medium, body.speed_mbps))
             created += 1
         except sqlite3.IntegrityError:
+            front_id = None
             skipped += 1
-    audit.log(me.name, "port.bulk_create", "device", did, f"{body.prefix}{body.start}..: {created} angelegt, {skipped} übersprungen")
+        if body.dual:
+            back_name = f"{body.prefix}{i}{body.back_suffix}"
+            try:
+                back_id = db.execute("INSERT INTO ports(device_id, name, idx, medium, speed_mbps) VALUES (?,?,?,?,?)",
+                                     (did, back_name, i, body.medium, body.speed_mbps))
+                created += 1
+                if front_id:
+                    db.execute("UPDATE ports SET peer_port_id = ? WHERE id = ?", (back_id, front_id))
+                    db.execute("UPDATE ports SET peer_port_id = ? WHERE id = ?", (front_id, back_id))
+            except sqlite3.IntegrityError:
+                skipped += 1
+    audit.log(me.name, "port.bulk_create", "device", did,
+              f"{body.prefix}{body.start}..: {created} angelegt, {skipped} übersprungen" + (" (dual)" if body.dual else ""))
     return {"created": created, "skipped": skipped}
 
 
@@ -339,7 +399,7 @@ def update_port(pid: int, body: PortIn, me: Principal = Depends(require_master_w
     except sqlite3.IntegrityError:
         raise HTTPException(409, f"Der Port '{body.name}' existiert an diesem Gerät bereits")
     audit.log(me.name, "port.update", "port", pid, body.name)
-    return db.row("SELECT * FROM ports WHERE id = ?", (pid,))
+    return _port_with_cable(db.row("SELECT * FROM ports WHERE id = ?", (pid,)))
 
 
 @router.delete("/ports/{pid}")
@@ -373,4 +433,120 @@ def set_peer(pid: int, body: PeerIn, me: Principal = Depends(require_master_writ
         db.execute("UPDATE ports SET peer_port_id = ? WHERE id = ?", (q["id"], pid))
         db.execute("UPDATE ports SET peer_port_id = ? WHERE id = ?", (pid, q["id"]))
     audit.log(me.name, "port.peer", "port", pid, f"-> {body.peer_port_id}")
-    return db.row("SELECT * FROM ports WHERE id = ?", (pid,))
+    return _port_with_cable(db.row("SELECT * FROM ports WHERE id = ?", (pid,)))
+
+
+@router.get("/cables")
+def list_cables(
+    cable_type: Optional[str] = None,
+    measurement_ok: Optional[str] = None,
+    q: Optional[str] = None,
+    _: Principal = Depends(current_principal),
+):
+    """Alle Kabel, optional gefiltert nach Typ, Messstatus oder Kabelnummer."""
+    where, args = [], []
+    if cable_type:
+        where.append("c.cable_type = ?"); args.append(cable_type)
+    if measurement_ok == "yes":
+        where.append("c.measurement_ok = 1")
+    elif measurement_ok == "no":
+        where.append("c.measurement_ok = 0")
+    elif measurement_ok == "none":
+        where.append("c.measurement_ok IS NULL")
+    if q:
+        where.append("(c.cable_label LIKE ? OR c.note LIKE ? OR c.measurement_ref LIKE ?)")
+        args += [f"%{q}%", f"%{q}%", f"%{q}%"]
+    w = ("WHERE " + " AND ".join(where)) if where else ""
+    rows = db.rows(
+        f"""SELECT c.*,
+                   pa.name AS port_a_name, da.hostname AS device_a_hostname, da.id AS device_a_id,
+                   pb.name AS port_b_name, db_.hostname AS device_b_hostname, db_.id AS device_b_id
+            FROM cables c
+            JOIN ports pa ON pa.id = c.port_a_id
+            JOIN devices da ON da.id = pa.device_id
+            JOIN ports pb ON pb.id = c.port_b_id
+            JOIN devices db_ ON db_.id = pb.device_id
+            {w}
+            ORDER BY c.cable_label COLLATE NOCASE, c.id""",
+        tuple(args),
+    )
+    return [_cable_out(r) for r in rows]
+
+
+def _cable_out(c: dict) -> dict:
+    return {
+        "id": c["id"],
+        "cable_label": c["cable_label"],
+        "cable_type": c["cable_type"],
+        "fiber_count": c["fiber_count"],
+        "length_m": c["length_m"],
+        "color": c["color"],
+        "installed_at": c["installed_at"],
+        "measurement_ref": c["measurement_ref"],
+        "measurement_ok": None if c["measurement_ok"] is None else bool(c["measurement_ok"]),
+        "note": c["note"],
+        "created_by": c["created_by"],
+        "created_at": c["created_at"],
+        "port_a": {"id": c["port_a_id"], "name": c["port_a_name"],
+                   "device_id": c["device_a_id"], "device_hostname": c["device_a_hostname"]},
+        "port_b": {"id": c["port_b_id"], "name": c["port_b_name"],
+                   "device_id": c["device_b_id"], "device_hostname": c["device_b_hostname"]},
+        "workorder_id": c.get("workorder_id"),
+    }
+
+
+@router.put("/cables/{cid}")
+def update_cable(cid: int, body: CableIn, me: Principal = Depends(require_master_write)):
+    """Kabelattribute aktualisieren (ohne die Port-Verbindung zu ändern)."""
+    c = db.row("SELECT * FROM cables WHERE id = ?", (cid,))
+    if not c:
+        raise HTTPException(404, "Kabel nicht gefunden")
+    _one_of(body.cable_type, CABLE_TYPES, "Kabeltyp")
+    db.execute(
+        """UPDATE cables SET cable_label=?, cable_type=?, fiber_count=?, length_m=?, color=?,
+                             installed_at=?, measurement_ref=?, measurement_ok=?, note=? WHERE id=?""",
+        (body.cable_label.strip(), body.cable_type, body.fiber_count, body.length_m,
+         body.color.strip(), body.installed_at, body.measurement_ref.strip(),
+         None if body.measurement_ok is None else int(body.measurement_ok),
+         body.note.strip(), cid),
+    )
+    audit.log(me.name, "cable.update", "cable", cid, body.cable_label)
+    row = db.row(
+        """SELECT c.*,
+                  pa.name AS port_a_name, da.hostname AS device_a_hostname, da.id AS device_a_id,
+                  pb.name AS port_b_name, db_.hostname AS device_b_hostname, db_.id AS device_b_id
+           FROM cables c
+           JOIN ports pa ON pa.id = c.port_a_id JOIN devices da ON da.id = pa.device_id
+           JOIN ports pb ON pb.id = c.port_b_id JOIN devices db_ ON db_.id = pb.device_id
+           WHERE c.id = ?""", (cid,))
+    return _cable_out(row)
+
+
+@router.put("/ports/{pid}/cable")
+def set_cable(pid: int, body: CableIn, me: Principal = Depends(require_master_write)):
+    """Verbindet zwei Ports mit einem Kabel (symmetrisch). port_b_id=None löst die Verbindung."""
+    p = db.row("SELECT * FROM ports WHERE id = ?", (pid,))
+    if not p:
+        raise HTTPException(404, "Port nicht gefunden")
+    _one_of(body.cable_type, CABLE_TYPES, "Kabeltyp")
+    db.execute("DELETE FROM cables WHERE port_a_id = ? OR port_b_id = ?", (pid, pid))
+    if body.port_b_id:
+        q = db.row("SELECT * FROM ports WHERE id = ?", (body.port_b_id,))
+        if not q:
+            raise HTTPException(404, "Zielport nicht gefunden")
+        if q["id"] == pid:
+            raise HTTPException(400, "Ein Port kann nicht mit sich selbst verbunden werden")
+        db.execute("DELETE FROM cables WHERE port_a_id = ? OR port_b_id = ?", (q["id"], q["id"]))
+        a, b = (pid, q["id"]) if pid < q["id"] else (q["id"], pid)
+        db.execute(
+            """INSERT INTO cables(port_a_id, port_b_id, cable_label, cable_type, fiber_count, length_m,
+                                  color, installed_at, measurement_ref, measurement_ok, note, created_by, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (a, b, body.cable_label.strip(), body.cable_type, body.fiber_count, body.length_m,
+             body.color.strip(), body.installed_at,
+             body.measurement_ref.strip(),
+             None if body.measurement_ok is None else int(body.measurement_ok),
+             body.note.strip(), me.name, time.time()),
+        )
+    audit.log(me.name, "cable.set", "port", pid, f"-> {body.port_b_id} [{body.cable_label}]")
+    return _port_with_cable(db.row("SELECT * FROM ports WHERE id = ?", (pid,)))
