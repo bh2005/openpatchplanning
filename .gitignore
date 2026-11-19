@@ -1,0 +1,14 @@
+# Abhängigkeiten / Build
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Laufzeitdaten und Geheimnisse (nie einchecken)
+data/*
+!data/.gitkeep
+.env
+*.pem
+*.key
