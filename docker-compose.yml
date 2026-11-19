@@ -1,0 +1,16 @@
+services:
+  openpatchplanning:
+    build: .
+    image: openpatchplanning:latest
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    environment:
+      # Start-Admin (nur beim ersten Start, solange es noch keinen Benutzer gibt).
+      # Leer lassen = Zufallspasswort erscheint im Log: docker compose logs openpatchplanning
+      OPP_ADMIN_PASSWORD: ${OPP_ADMIN_PASSWORD:-}
+    volumes:
+      - opp-data:/data
+
+volumes:
+  opp-data:

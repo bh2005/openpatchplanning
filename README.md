@@ -1,15 +1,25 @@
 # OpenPatchPlanning
 
 Verwaltung und Planung von **Verkabelung/Patchungen** (Switchport ↔ Patchfeld ↔ Dose ↔ Endgerät) im Browser.
-Schlank (ein Container: FastAPI + SQLite, Vue 3 / TypeScript), deutsche Oberfläche.
+Schlank (ein Container: FastAPI + SQLite, Vue 3 + Tailwind), deutsche Oberfläche.
 
 **Schwerpunkt ist der Ablauf, nicht die Bestandsliste:** Patchauftrag planen → freigeben → ausführen → bestätigen, mit Historie.
 Per **Soll/Ist-Abgleich** (LLDP) wird geprüft, ob die dokumentierte Verbindung wirklich so steckt. Eine feste Schnittstelle zu
 [OpenPlan](https://github.com/bh2005/openplan) verbindet Patchaufträge mit der Projektplanung.
 
-> **Status: Etappe 1 (Backend).** Stammdaten-API, Benutzer/Rollen, API-Zugänge, Audit und der Import (CSV, JSON, API, Checkmk) sind
-> implementiert und getestet (49 Tests). Die Oberfläche, Patchaufträge und die OpenPlan-Anbindung folgen – siehe
-> [docs/konzept.md](docs/konzept.md) (Datenmodell, Ablauf, Etappen) und [docs/checkmk-import.md](docs/checkmk-import.md).
+> **Status: Etappe 1 (Stammdaten, Import, Oberfläche).** Standorte/Racks, Geräte mit Ports, Rack-Ansicht, Import (CSV, JSON, API, Checkmk),
+> Benutzer/Rollen, API-Zugänge, Audit-Log, Hilfe-Panel (`F1`) und Handbuch sind implementiert (56 Tests). Patchaufträge und die
+> OpenPlan-Anbindung folgen – siehe [docs/konzept.md](docs/konzept.md) (Datenmodell, Ablauf, Etappen) und
+> [docs/checkmk-import.md](docs/checkmk-import.md).
+
+## Betrieb mit Docker
+
+```bash
+docker compose up -d --build         # Oberfläche und API unter http://localhost:8084
+docker compose logs openpatchplanning | grep -i passwort    # Start-Passwort, wenn OPP_ADMIN_PASSWORD leer war
+```
+
+Die Daten liegen im Volume `opp-data` (SQLite). Hinter einem TLS-inspizierenden Proxy müssen die Proxy-CA-Zertifikate beim Build bekannt sein.
 
 ## Schnellstart (Entwicklung)
 
@@ -19,6 +29,8 @@ python -m venv .venv && . .venv/bin/activate        # Python 3.12
 pip install -r requirements-dev.txt
 python -m pytest -q                                   # Tests
 OPP_ADMIN_PASSWORD=ChangeMe-123 uvicorn app.main:app --reload    # API und Swagger unter http://localhost:8000/api/docs
+
+cd ../frontend && npm install && npm run dev          # Oberfläche mit Hot Reload auf http://localhost:5173 (Proxy auf :8000)
 ```
 
 Konfiguration über Umgebungsvariablen (Präfix `OPP_`): `OPP_DATA_DIR` (SQLite, Standard `./data`), `OPP_ADMIN_USERNAME`,

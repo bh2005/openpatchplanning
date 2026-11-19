@@ -9,7 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import auth
 from .config import settings
-from .routers import accounts, imports, masterdata
+from .routers import accounts, imports, masterdata, overview
+from .static import find_static_dir, register_static
 
 logger = logging.getLogger("opp")
 
@@ -29,6 +30,7 @@ if settings.cors_origins.strip():
 app.include_router(accounts.router)
 app.include_router(masterdata.router)
 app.include_router(imports.router)
+app.include_router(overview.router)
 
 
 @app.on_event("startup")
@@ -44,3 +46,7 @@ async def startup() -> None:
 @app.get("/health", tags=["system"])
 def health():
     return {"status": "ok", "version": app.version}
+
+
+# Muss zuletzt stehen: liefert die Oberfläche (falls gebaut) für alle Pfade außerhalb der API
+register_static(app, find_static_dir(settings.static_dir))

@@ -203,13 +203,25 @@ def list_devices(
     return {"total": total, "items": [_device_out(d) for d in items]}
 
 
-def _check_device(body: DeviceIn) -> None:
+def _check_device(body: DeviceIn, own_id: Optional[int] = None) -> None:
     _one_of(body.type, DEVICE_TYPES, "Typ")
     _one_of(body.status, DEVICE_STATUS, "Status")
-    if body.location_id and not db.row("SELECT id FROM locations WHERE id = ?", (body.location_id,)):
+    loc = db.row("SELECT * FROM locations WHERE id = ?", (body.location_id,)) if body.location_id else None
+    if body.location_id and not loc:
         raise HTTPException(400, "Location nicht gefunden")
-    if body.rack_position and not body.location_id:
-        raise HTTPException(400, "Eine HE-Position braucht eine Location (Rack)")
+    if body.rack_position:
+        if not loc:
+            raise HTTPException(400, "Eine HE-Position braucht eine Location (Rack)")
+        if loc["kind"] != "rack":
+            raise HTTPException(400, "Eine HE-Position ist nur in einem Rack möglich")
+        top = body.rack_position + body.height_u - 1
+        if loc["rack_units"] and top > loc["rack_units"]:
+            raise HTTPException(400, f"Das Gerät passt nicht ins Rack ({loc['rack_units']} HE): belegt HE {body.rack_position}–{top}")
+        for o in db.rows("SELECT id, hostname, rack_position, height_u FROM devices WHERE location_id = ? AND rack_position IS NOT NULL",
+                         (loc["id"],)):
+            if o["id"] != own_id and not (top < o["rack_position"] or o["rack_position"] + o["height_u"] - 1 < body.rack_position):
+                raise HTTPException(409, f"HE {body.rack_position}–{top} überschneidet sich mit {o['hostname']} "
+                                         f"(HE {o['rack_position']}–{o['rack_position'] + o['height_u'] - 1})")
 
 
 @router.get("/devices/{did}")
@@ -228,10 +240,10 @@ def create_device(body: DeviceIn, me: Principal = Depends(require_master_write))
     now = time.time()
     try:
         did = db.execute(
-            """INSERT INTO devices(hostname, type, vendor, model, serial, mgmt_ip, location_id, rack_position, status,
-                                   source, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO devices(hostname, type, vendor, model, serial, mgmt_ip, location_id, rack_position, height_u, status,
+                                   source, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (body.hostname.strip(), body.type, body.vendor.strip(), body.model.strip(), body.serial.strip(), body.mgmt_ip.strip(),
-             body.location_id, body.rack_position, body.status, "manual", body.note.strip(), now, now))
+             body.location_id, body.rack_position, body.height_u, body.status, "manual", body.note.strip(), now, now))
     except sqlite3.IntegrityError:
         raise HTTPException(409, f"Ein Gerät mit dem Hostnamen '{body.hostname}' existiert bereits")
     audit.log(me.name, "device.create", "device", did, body.hostname)
@@ -242,13 +254,13 @@ def create_device(body: DeviceIn, me: Principal = Depends(require_master_write))
 def update_device(did: int, body: DeviceIn, me: Principal = Depends(require_master_write)):
     if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
         raise HTTPException(404, "Gerät nicht gefunden")
-    _check_device(body)
+    _check_device(body, own_id=did)
     try:
         db.execute(
             """UPDATE devices SET hostname=?, type=?, vendor=?, model=?, serial=?, mgmt_ip=?, location_id=?, rack_position=?,
-                                  status=?, note=?, updated_at=? WHERE id=?""",
+                                  height_u=?, status=?, note=?, updated_at=? WHERE id=?""",
             (body.hostname.strip(), body.type, body.vendor.strip(), body.model.strip(), body.serial.strip(), body.mgmt_ip.strip(),
-             body.location_id, body.rack_position, body.status, body.note.strip(), time.time(), did))
+             body.location_id, body.rack_position, body.height_u, body.status, body.note.strip(), time.time(), did))
     except sqlite3.IntegrityError:
         raise HTTPException(409, f"Ein Gerät mit dem Hostnamen '{body.hostname}' existiert bereits")
     audit.log(me.name, "device.update", "device", did, body.hostname)

@@ -1,0 +1,141 @@
+<template>
+  <div class="max-w-6xl space-y-4">
+    <div class="flex items-center justify-between">
+      <h1 class="text-lg font-semibold text-slate-800 dark:text-slate-100">Standorte</h1>
+      <button v-if="canWrite" @click="openSite()" :class="btnPrimary">+ Standort</button>
+    </div>
+    <p v-if="error" class="text-sm text-red-500">{{ error }}</p>
+
+    <div class="grid md:grid-cols-3 gap-4">
+      <div :class="card" class="p-2 md:col-span-1">
+        <p v-if="!sites.length" class="text-sm text-slate-400 p-3">Noch kein Standort angelegt.</p>
+        <button v-for="s in sites" :key="s.id" @click="select(s)"
+          class="w-full text-left px-3 py-2 rounded-lg transition-colors"
+          :class="sel?.id === s.id ? 'bg-ks-50 dark:bg-ks-900/30' : 'hover:bg-slate-50 dark:hover:bg-slate-700/50'">
+          <div class="text-sm font-medium text-slate-800 dark:text-slate-100">{{ s.code }} <span class="font-normal text-slate-400">· {{ s.name }}</span></div>
+          <div class="text-[11px] text-slate-400">{{ s.locations }} Locations · {{ s.devices }} Geräte</div>
+        </button>
+      </div>
+
+      <div :class="card" class="p-4 md:col-span-2" v-if="sel">
+        <div class="flex items-start justify-between mb-3">
+          <div>
+            <h2 class="text-sm font-semibold text-slate-800 dark:text-slate-100">{{ sel.code }} · {{ sel.name }}</h2>
+            <p v-if="sel.address" class="text-xs text-slate-400">{{ sel.address }}</p>
+            <p v-if="sel.note" class="text-xs text-slate-400">{{ sel.note }}</p>
+          </div>
+          <div v-if="canWrite" class="flex gap-3 items-center">
+            <button :class="btnLink" @click="openSite(sel)">Bearbeiten</button>
+            <button :class="btnDanger" @click="removeSite">Löschen</button>
+            <button :class="btnPrimary" @click="openLoc()">+ Location</button>
+          </div>
+        </div>
+
+        <p v-if="!tree.length" class="text-sm text-slate-400">Noch keine Gebäude, Räume oder Racks.</p>
+        <ul class="text-sm">
+          <li v-for="n in tree" :key="n.id" class="flex items-center gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50" :style="{ paddingLeft: n.depth * 18 + 'px' }">
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300">{{ kindLabel(n.kind) }}</span>
+            <span class="text-slate-800 dark:text-slate-100">{{ n.name }}</span>
+            <span v-if="n.rack_units" class="text-xs text-slate-400">{{ n.rack_units }} HE</span>
+            <router-link v-if="n.devices" :to="{ path: '/devices', query: { location_id: n.id } }" class="text-xs text-ks-600 dark:text-ks-400 hover:underline">{{ n.devices }} Geräte</router-link>
+            <span v-if="canWrite" class="ml-auto flex gap-3">
+              <button :class="btnLink" @click="openLoc(n)">Bearbeiten</button>
+              <button :class="btnLink" @click="openLoc(null, n)">+ darunter</button>
+              <button :class="btnDanger" @click="removeLoc(n)">Löschen</button>
+            </span>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <ModalDialog v-if="siteForm" :title="siteForm.id ? 'Standort bearbeiten' : 'Neuer Standort'" :error="formError" @close="siteForm = null">
+      <div><label :class="lbl">Code</label><input v-model="siteForm.code" :class="inp" placeholder="z. B. SITE-A" /></div>
+      <div><label :class="lbl">Name</label><input v-model="siteForm.name" :class="inp" /></div>
+      <div><label :class="lbl">Adresse</label><input v-model="siteForm.address" :class="inp" /></div>
+      <div><label :class="lbl">Notiz</label><input v-model="siteForm.note" :class="inp" /></div>
+      <template #footer>
+        <button @click="siteForm = null" :class="btnGhost">Abbrechen</button>
+        <button @click="saveSite" :class="btnPrimary" :disabled="!siteForm.code || !siteForm.name">Speichern</button>
+      </template>
+    </ModalDialog>
+
+    <ModalDialog v-if="locForm" :title="locForm.id ? 'Location bearbeiten' : 'Neue Location'" :error="formError" @close="locForm = null">
+      <div><label :class="lbl">Art</label>
+        <select v-model="locForm.kind" :class="inp"><option v-for="[k, l] in LOCATION_KINDS" :key="k" :value="k">{{ l }}</option></select></div>
+      <div><label :class="lbl">Name</label><input v-model="locForm.name" :class="inp" /></div>
+      <div><label :class="lbl">Übergeordnet</label>
+        <select v-model="locForm.parent_id" :class="inp"><option :value="null">(oberste Ebene)</option>
+          <option v-for="n in parentChoices" :key="n.id" :value="n.id">{{ '– '.repeat(n.depth) }}{{ n.name }}</option></select></div>
+      <div v-if="locForm.kind === 'rack'"><label :class="lbl">Höheneinheiten (HE)</label><input v-model.number="locForm.rack_units" type="number" min="1" max="100" :class="inp" /></div>
+      <div><label :class="lbl">Notiz</label><input v-model="locForm.note" :class="inp" /></div>
+      <template #footer>
+        <button @click="locForm = null" :class="btnGhost">Abbrechen</button>
+        <button @click="saveLoc" :class="btnPrimary" :disabled="!locForm.name">Speichern</button>
+      </template>
+    </ModalDialog>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+import ModalDialog from '../components/ModalDialog.vue'
+import { api, errText, isAdmin } from '../api.js'
+import { inp, lbl, card, btnPrimary, btnGhost, btnDanger, btnLink, LOCATION_KINDS, kindLabel } from '../ui.js'
+
+const canWrite = isAdmin()
+const sites = ref([]), sel = ref(null), locations = ref([])
+const error = ref(''), formError = ref('')
+const siteForm = ref(null), locForm = ref(null)
+
+// Locations als Baum mit Einrückungstiefe (Eltern vor Kindern)
+const tree = computed(() => {
+  const out = []
+  const walk = (parent, depth) => locations.value.filter(l => (l.parent_id || null) === parent)
+    .forEach(l => { out.push({ ...l, depth }); walk(l.id, depth + 1) })
+  walk(null, 0)
+  return out
+})
+const parentChoices = computed(() => tree.value.filter(n => n.id !== locForm.value?.id && n.kind !== 'rack'))
+
+async function load(keepId) {
+  try {
+    sites.value = await api.sites()
+    sel.value = sites.value.find(s => s.id === keepId) || sites.value[0] || null
+    await loadLocations()
+  } catch (e) { error.value = errText(e) }
+}
+async function loadLocations() { locations.value = sel.value ? await api.locations(sel.value.id) : [] }
+async function select(s) { sel.value = s; await loadLocations() }
+
+function openSite(s) { formError.value = ''; siteForm.value = s ? { ...s } : { code: '', name: '', address: '', note: '' } }
+async function saveSite() {
+  try {
+    const f = siteForm.value
+    const saved = f.id ? await api.updateSite(f.id, f) : await api.createSite(f)
+    siteForm.value = null; await load(saved.id)
+  } catch (e) { formError.value = errText(e) }
+}
+async function removeSite() {
+  if (!confirm(`Standort ${sel.value.code} löschen?`)) return
+  try { await api.deleteSite(sel.value.id); await load() } catch (e) { error.value = errText(e) }
+}
+
+function openLoc(edit, parent) {
+  formError.value = ''
+  locForm.value = edit ? { ...edit } : { site_id: sel.value.id, parent_id: parent?.id ?? null, kind: parent ? (parent.kind === 'building' ? 'floor' : parent.kind === 'floor' ? 'room' : 'rack') : 'building', name: '', rack_units: null, note: '' }
+}
+async function saveLoc() {
+  try {
+    const f = { ...locForm.value }
+    if (f.kind !== 'rack') f.rack_units = null
+    f.id ? await api.updateLocation(f.id, f) : await api.createLocation(f)
+    locForm.value = null; await load(sel.value.id)
+  } catch (e) { formError.value = errText(e) }
+}
+async function removeLoc(n) {
+  if (!confirm(`„${n.name}“ löschen?`)) return
+  try { await api.deleteLocation(n.id); await load(sel.value.id) } catch (e) { error.value = errText(e) }
+}
+
+onMounted(() => load())
+</script>

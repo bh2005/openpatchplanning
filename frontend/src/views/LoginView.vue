@@ -1,0 +1,35 @@
+<template>
+  <div class="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900 px-4">
+    <form @submit.prevent="submit" :class="card" class="w-full max-w-sm p-6 space-y-4">
+      <div class="text-center">
+        <div class="text-lg font-bold text-ks-700 dark:text-ks-300">OpenPatchPlanning</div>
+        <div class="text-xs text-slate-400">Patchplanung</div>
+      </div>
+      <p v-if="error" class="text-sm bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300 rounded-lg px-3 py-2">{{ error }}</p>
+      <div><label :class="lbl">Benutzername</label><input v-model="username" autocomplete="username" autofocus :class="inp" /></div>
+      <div><label :class="lbl">Passwort</label><input v-model="password" type="password" autocomplete="current-password" :class="inp" /></div>
+      <button :disabled="busy || !username || !password" :class="btnPrimary" class="w-full">{{ busy ? 'Anmelden…' : 'Anmelden' }}</button>
+    </form>
+  </div>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { api, setToken, setUser, errText } from '../api.js'
+import { inp, lbl, card, btnPrimary } from '../ui.js'
+
+const router = useRouter(), route = useRoute()
+const username = ref(''), password = ref(''), busy = ref(false), error = ref('')
+
+async function submit() {
+  busy.value = true; error.value = ''
+  try {
+    const r = await api.login(username.value, password.value)
+    setToken(r.token); setUser(r.user)
+    const to = String(route.query.redirect || '')
+    router.push(to.startsWith('/') && !to.startsWith('//') ? to : '/dashboard')
+  } catch (e) { error.value = errText(e, 'Anmeldung fehlgeschlagen') }
+  finally { busy.value = false }
+}
+</script>

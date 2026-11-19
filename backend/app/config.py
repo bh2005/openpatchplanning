@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     admin_password: str = ""            # leer = Zufallspasswort im Log
     session_ttl_hours: int = 8
     min_password_len: int = 8
+    static_dir: str = ""                # gebaute Oberfläche (leer = frontend/dist bzw. /app/static automatisch suchen)
     cors_origins: str = ""              # kommagetrennt, nur für die Entwicklung (Vite-Dev-Server)
 
 

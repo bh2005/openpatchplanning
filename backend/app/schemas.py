@@ -37,6 +37,7 @@ class DeviceIn(BaseModel):
     mgmt_ip: str = ""
     location_id: Optional[int] = None
     rack_position: Optional[int] = Field(default=None, ge=1, le=100)
+    height_u: int = Field(default=1, ge=1, le=50)
     status: str = "active"
     note: str = ""
 
