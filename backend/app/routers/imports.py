@@ -7,7 +7,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from .. import audit, db, importer
+from .. import audit, checkmk, db, importer
 from ..auth import Principal, current_principal, require_master_write
 
 router = APIRouter(prefix="/api/import", tags=["import"])
@@ -92,6 +92,35 @@ def json_import(body: JsonImport, me: Principal = Depends(require_master_write))
     audit.log(me.name, "import.json", "import", result["run_id"],
               f"{'Trockenlauf ' if body.dry_run else ''}{result['stats']} angewendet={result['applied']}")
     return result
+
+
+class CheckmkHost(BaseModel):
+    host: str = Field(min_length=1, max_length=120)
+    inventory: dict[str, Any]
+
+
+class CheckmkImport(BaseModel):
+    """Inventarbäume von Checkmk-Hosts (siehe tools/checkmk_export.py): {"hosts": [{"host": "sw-1", "inventory": {...}}]}"""
+    hosts: list[CheckmkHost] = Field(min_length=1, max_length=2000)
+    dry_run: bool = False
+    atomic: bool = True
+    create_locations: bool = True
+    site_code: str = ""                      # Standort-Code, dem alle Geräte dieses Imports zugeordnet werden (optional)
+    include_all_interfaces: bool = False     # sonst nur Ethernet-Ports (keine Loopbacks, VLANs, Tunnel)
+    all_hosts: bool = False                  # auch Hosts ohne Interfaces als Gerät anlegen
+
+
+@router.post("/checkmk")
+def checkmk_import(body: CheckmkImport, me: Principal = Depends(require_master_write)):
+    """Geräte und Ports aus dem Checkmk-HW/SW-Inventar. Gleicher Ablauf wie JSON (Trockenlauf, atomar, idempotent über den Hostnamen)."""
+    records, lldp, skipped = checkmk.records_from_hosts([h.model_dump() for h in body.hosts], body.site_code,
+                                                        body.include_all_interfaces, body.all_hosts)
+    if not records:
+        raise HTTPException(400, "Kein Host mit Interfaces im Inventar (alle %d Hosts übersprungen)" % len(skipped))
+    result = importer.run(records, "checkmk", me.name, body.dry_run, body.atomic, body.create_locations)
+    audit.log(me.name, "import.checkmk", "import", result["run_id"],
+              f"{'Trockenlauf ' if body.dry_run else ''}{result['stats']} übersprungen={len(skipped)} lldp_hosts={len(lldp)}")
+    return {**result, "skipped_hosts": skipped[:200], "skipped_count": len(skipped), "lldp_hosts": len(lldp)}
 
 
 @router.get("/runs")

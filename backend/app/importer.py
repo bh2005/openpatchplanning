@@ -20,6 +20,7 @@ from . import db
 from .schemas import DEVICE_STATUS, DEVICE_TYPES, LOCATION_KINDS, PORT_MEDIA
 
 MAX_ITEMS_IN_RESULT = 1000
+DEFAULT_LOCATION = "Allgemein"         # Standard-Location, wenn nur ein Standortcode angegeben ist
 
 TYPE_ALIASES = {
     "sw": "switch", "accesspoint": "ap", "wlan": "ap", "wap": "ap", "fw": "firewall",
@@ -206,6 +207,8 @@ def _resolve_location(c: sqlite3.Connection, spec: str, create: bool) -> Optiona
         sid = c.execute("INSERT INTO sites(code, name) VALUES (?,?)", (parts[0], parts[0])).lastrowid
     else:
         sid = site["id"]
+    if len(parts) == 1:                          # nur der Standort: Geräte hängen an einer Location -> Standard-Location „Allgemein“
+        parts.append(DEFAULT_LOCATION)
     parent: Optional[int] = None
     for depth, name in enumerate(parts[1:], 1):
         found = c.execute("SELECT id FROM locations WHERE site_id = ? AND name = ? COLLATE NOCASE AND "

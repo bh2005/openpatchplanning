@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Checkmk-Inventar nach OpenPatchPlanning übertragen.
+
+Läuft auf dem Checkmk-Server (als Site-Benutzer oder root), liest die HW/SW-Inventar-JSON-Dateien
+(``<site>/var/check_mk/inventory/<host>.json``) und schickt Hosts mit Interfaces an ``POST /api/import/checkmk``.
+Nur die Standardbibliothek wird benötigt (Python >= 3.8).
+
+Beispiele
+  # Trockenlauf (Standard-Verzeichnis der Site „test“): zeigt, was passieren würde
+  ./checkmk_export.py --site test --url https://opp.example.com --token opp_... --dry-run
+
+  # echter Import, nur Hosts passend zu einem Muster, mit Standort-Zuordnung
+  ./checkmk_export.py --site test --url https://opp.example.com --token opp_... --hosts '^sw-' --site-code SITE-A
+
+  # nur ausgeben, nichts senden (z. B. zum Prüfen oder für den JSON-Import)
+  ./checkmk_export.py --site test --print > export.json
+
+Den API-Zugang (Umfang „write“) legt ein Administrator in OpenPatchPlanning unter Verwaltung → API-Zugänge an.
+Das Token kann auch über die Umgebungsvariable OPP_TOKEN gesetzt werden (dann taucht es nicht in der Prozessliste auf).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import ssl
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+def has_interfaces(tree: dict) -> bool:
+    try:
+        return bool(tree["Nodes"]["networking"]["Nodes"]["interfaces"]["Table"]["Rows"])
+    except (KeyError, TypeError):
+        return False
+
+
+def load_hosts(inv_dir: Path, pattern: str = "", only_with_interfaces: bool = True) -> list[dict]:
+    """Liest alle ``*.json`` (Host = Dateiname ohne Endung); ``*.json.gz`` wird ignoriert."""
+    rx = re.compile(pattern) if pattern else None
+    out = []
+    for f in sorted(inv_dir.glob("*.json")):
+        host = f.name[:-5]
+        if rx and not rx.search(host):
+            continue
+        try:
+            tree = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"übersprungen: {f.name}: {e}", file=sys.stderr)
+            continue
+        if only_with_interfaces and not has_interfaces(tree):
+            continue
+        out.append({"host": host, "inventory": tree})
+    return out
+
+
+def post(url: str, token: str, payload: dict, ca_file: str = "", insecure: bool = False, timeout: int = 300) -> dict:
+    ctx = ssl.create_default_context(cafile=ca_file or None)
+    if insecure:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url.rstrip("/") + "/api/import/checkmk", data=json.dumps(payload).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", "Authorization": "Bearer " + token}, method="POST")
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:500]
+        raise SystemExit(f"Fehler {e.code}: {detail}")
+    except urllib.error.URLError as e:
+        raise SystemExit(f"Verbindung fehlgeschlagen: {e.reason}")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--site", default=os.environ.get("OMD_SITE", ""), help="Checkmk-Site (bestimmt das Standardverzeichnis)")
+    ap.add_argument("--inventory-dir", default="", help="Verzeichnis der Inventar-JSONs (Standard: /omd/sites/<site>/var/check_mk/inventory)")
+    ap.add_argument("--url", default=os.environ.get("OPP_URL", ""), help="Adresse von OpenPatchPlanning, z. B. https://opp.example.com")
+    ap.add_argument("--token", default=os.environ.get("OPP_TOKEN", ""), help="API-Zugang (opp_…), besser per OPP_TOKEN setzen")
+    ap.add_argument("--hosts", default="", help="Regulärer Ausdruck für Hostnamen (Standard: alle mit Interfaces)")
+    ap.add_argument("--site-code", default="", help="Standort-Code, dem alle Geräte zugeordnet werden")
+    ap.add_argument("--all-interfaces", action="store_true", help="auch Loopbacks, VLANs und Tunnel als Ports übernehmen")
+    ap.add_argument("--dry-run", action="store_true", help="nichts speichern, nur das Ergebnis anzeigen")
+    ap.add_argument("--no-atomic", action="store_true", help="fehlerhafte Hosts überspringen statt den ganzen Stapel abzulehnen")
+    ap.add_argument("--batch", type=int, default=300, help="Hosts je Anfrage (Standard 300)")
+    ap.add_argument("--ca-file", default="", help="CA-Zertifikat für HTTPS (interne CA)")
+    ap.add_argument("--insecure", action="store_true", help="Zertifikat nicht prüfen (nur für Tests)")
+    ap.add_argument("--print", dest="print_only", action="store_true", help="nur als JSON ausgeben, nichts senden")
+    a = ap.parse_args(argv)
+
+    inv = Path(a.inventory_dir or f"/omd/sites/{a.site}/var/check_mk/inventory")
+    if not inv.is_dir():
+        raise SystemExit(f"Inventarverzeichnis nicht gefunden: {inv} (--site oder --inventory-dir angeben)")
+    hosts = load_hosts(inv, a.hosts)
+    print(f"{len(hosts)} Host(s) mit Interfaces in {inv}", file=sys.stderr)
+    if a.print_only:
+        json.dump({"hosts": hosts}, sys.stdout)
+        return 0
+    if not hosts:
+        return 0
+    if not a.url or not a.token:
+        raise SystemExit("--url und --token (oder OPP_URL/OPP_TOKEN) sind nötig")
+
+    total = {"created": 0, "updated": 0, "unchanged": 0, "errors": 0}
+    failed = False
+    for i in range(0, len(hosts), max(1, a.batch)):
+        chunk = hosts[i:i + a.batch]
+        res = post(a.url, a.token, {"hosts": chunk, "dry_run": a.dry_run, "atomic": not a.no_atomic,
+                                    "site_code": a.site_code, "include_all_interfaces": a.all_interfaces},
+                   a.ca_file, a.insecure)
+        for k in total:
+            total[k] += res["stats"].get(k, 0)
+        print(f"Stapel {i // a.batch + 1}: {res['stats']} angewendet={res['applied']} übersprungen={res.get('skipped_count', 0)}", file=sys.stderr)
+        for it in res["items"]:
+            if it["outcome"] == "error":
+                print(f"  FEHLER {it['hostname']}: {it.get('message')}", file=sys.stderr)
+                failed = True
+    print(("TROCKENLAUF – " if a.dry_run else "") + f"Gesamt: {total}", file=sys.stderr)
+    return 1 if failed and not a.no_atomic else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
