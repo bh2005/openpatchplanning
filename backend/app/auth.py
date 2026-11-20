@@ -38,9 +38,37 @@ class Principal:
     roles: set = field(default_factory=set)
     scope: str = ""                   # nur Tokens: read | write
     user_id: Optional[int] = None
+    scopes: dict = field(default_factory=dict)   # Standort-ID -> Rollen nur an diesem Standort
 
     def has(self, *roles: str) -> bool:
+        """Globale Rolle (gilt überall)."""
         return self.kind == "user" and ("admin" in self.roles or bool(self.roles & set(roles)))
+
+    def has_at(self, site_id: Optional[int], *roles: str) -> bool:
+        """Rolle am Standort: global oder per Zuweisung für genau diesen Standort (Bereichs-Admin darf dort alles)."""
+        if self.has(*roles):
+            return True
+        if site_id is None:
+            return False
+        r = self.scopes.get(site_id, set())
+        return "admin" in r or bool(r & set(roles))
+
+    @property
+    def is_global(self) -> bool:
+        """Sieht und darf global: API-Zugänge und Benutzer mit mindestens einer globalen Rolle."""
+        return self.kind == "token" or bool(self.roles)
+
+    @property
+    def admin_sites(self) -> set:
+        return {s for s, r in self.scopes.items() if "admin" in r}
+
+    @property
+    def can_administer_users(self) -> bool:
+        return self.is_admin or bool(self.admin_sites)
+
+    def any_role(self, *roles: str) -> bool:
+        """Rolle irgendwo (global oder an einem Standort) – nur für die Sichtbarkeit von Menüs, nie für Rechte."""
+        return self.has(*roles) or any("admin" in r or r & set(roles) for r in self.scopes.values())
 
     @property
     def is_admin(self) -> bool:
@@ -58,10 +86,23 @@ def parse_roles(value: str) -> list[str]:
     return [r for r in (value or "").split(",") if r]
 
 
+def user_scopes(user_id: int) -> list[dict]:
+    return db.rows("""SELECT us.id, us.role, us.site_id, us.source, s.code AS site_code, s.name AS site_name
+                      FROM user_scopes us JOIN sites s ON s.id = us.site_id
+                      WHERE us.user_id = ? ORDER BY s.code COLLATE NOCASE, us.role""", (user_id,))
+
+
+def scope_map(user_id: int) -> dict:
+    out: dict = {}
+    for r in db.rows("SELECT site_id, role FROM user_scopes WHERE user_id = ?", (user_id,)):
+        out.setdefault(r["site_id"], set()).add(r["role"])
+    return out
+
+
 def public_user(u: dict) -> dict:
     return {
         "id": u["id"], "username": u["username"], "full_name": u["full_name"], "email": u["email"],
-        "roles": parse_roles(u["roles"]), "source": u["source"], "active": bool(u["active"]),
+        "roles": parse_roles(u["roles"]), "scopes": user_scopes(u["id"]), "source": u["source"], "active": bool(u["active"]),
         "created_at": u["created_at"], "last_login": u["last_login"],
     }
 
@@ -71,11 +112,11 @@ def check_password_policy(pw: str) -> None:
         raise HTTPException(400, f"Passwort muss mindestens {settings.min_password_len} Zeichen haben")
 
 
-def check_roles(roles: list[str]) -> list[str]:
+def check_roles(roles: list[str], allow_empty: bool = False) -> list[str]:
     bad = [r for r in roles if r not in ROLES]
     if bad:
         raise HTTPException(400, f"Unbekannte Rolle(n): {', '.join(bad)} (erlaubt: {', '.join(ROLES)})")
-    if not roles:
+    if not roles and not allow_empty:
         raise HTTPException(400, "Mindestens eine Rolle ist erforderlich")
     return sorted(set(roles), key=ROLES.index)
 
@@ -95,9 +136,54 @@ def init() -> Optional[str]:
     return None
 
 
+def _login_ldap(username: str, password: str, u: Optional[dict]) -> dict:
+    """Anmeldung über das Verzeichnis. Das Konto entsteht beim ersten Login (wenn erlaubt); Name, E-Mail und Rollen
+    werden bei jeder Anmeldung aus dem Verzeichnis übernommen. Lokale Konten bleiben rein lokal."""
+    from . import ldap_auth
+    cfg = ldap_auth.settings()
+    info = ldap_auth.authenticate(username, password, cfg)
+    if info:
+        u = db.row("SELECT * FROM users WHERE username = ?", (info["username"],)) or u        # SAM-Name kann von der Eingabe abweichen
+    if not info or (u and u["source"] != "ldap"):
+        audit.log(username or "?", "auth.login_failed", detail="ldap")
+        raise HTTPException(401, "Ungültige Anmeldedaten")
+    roles = ",".join(sorted(set(info["roles"]), key=ROLES.index))
+    if u:
+        if not u["active"]:
+            audit.log(u["username"], "auth.login_failed", detail="ldap: Konto deaktiviert")
+            raise HTTPException(401, "Ungültige Anmeldedaten")
+        db.execute("UPDATE users SET full_name=?, email=?, roles=? WHERE id=?",
+                   (info["display"] or u["full_name"], info["email"] or u["email"], roles, u["id"]))
+        old_scopes = sorted((r["role"], r["site_id"]) for r in db.rows("SELECT role, site_id FROM user_scopes WHERE user_id = ? AND source = 'ldap'", (u["id"],)))
+        if roles != u["roles"] or old_scopes != sorted(info.get("scopes") or []):
+            db.execute("UPDATE users SET token_version = token_version + 1 WHERE id = ?", (u["id"],))   # alte Sitzungen mit alten Rechten beenden
+    else:
+        if not cfg["auto_create"]:
+            audit.log(username, "auth.login_failed", detail="ldap: Konto nicht angelegt")
+            raise HTTPException(401, "Für dieses Konto gibt es noch keinen Zugang – bitte einen Administrator fragen")
+        uid = db.execute(
+            "INSERT INTO users(username, full_name, email, roles, source, password_hash, created_at) VALUES (?,?,?,?,?,?,?)",
+            (info["username"], info["display"], info["email"], roles, "ldap", "ldap$" + secrets.token_hex(16), time.time()))
+        u = db.row("SELECT * FROM users WHERE id = ?", (uid,))
+        audit.log(info["username"], "user.create", "user", uid, f"ldap [{roles}]")
+    db.execute("DELETE FROM user_scopes WHERE user_id = ? AND source = 'ldap'", (u["id"],))      # Standort-Rechte aus AD-Gruppen neu setzen
+    for role, site_id in info.get("scopes") or []:
+        db.execute("INSERT OR IGNORE INTO user_scopes(user_id, role, site_id, source) VALUES (?,?,?, 'ldap')", (u["id"], role, site_id))
+    db.execute("UPDATE users SET last_login = ? WHERE id = ?", (time.time(), u["id"]))
+    u = db.row("SELECT * FROM users WHERE id = ?", (u["id"],))
+    token = new_session_token()
+    _sessions[token] = {"uid": u["id"], "tv": u["token_version"], "exp": time.time() + settings.session_ttl_hours * 3600}
+    audit.log(u["username"], "auth.login", detail="ldap")
+    return {"token": token, "user": public_user(u)}
+
+
 def login(username: str, password: str) -> dict:
     username = (username or "").strip()
     u = db.row("SELECT * FROM users WHERE username = ?", (username,)) if username else None
+    if username and (not u or u["source"] == "ldap"):
+        from . import ldap_auth
+        if ldap_auth.enabled():
+            return _login_ldap(username, password, u)
     if not u or u["source"] != "local" or not u["active"] or not verify_password(password or "", u["password_hash"]):
         audit.log(username or "?", "auth.login_failed")
         raise HTTPException(401, "Ungültige Anmeldedaten")
@@ -138,7 +224,7 @@ def _principal_from_session(token: str) -> Principal:
     if not u or not u["active"] or u["token_version"] != s["tv"]:
         _sessions.pop(token, None)
         raise HTTPException(401, "Sitzung nicht mehr gültig")
-    return Principal("user", u["username"], set(parse_roles(u["roles"])), user_id=u["id"])
+    return Principal("user", u["username"], set(parse_roles(u["roles"])), user_id=u["id"], scopes=scope_map(u["id"]))
 
 
 def _principal_from_api_token(raw: str) -> Principal:
@@ -191,3 +277,10 @@ def require_roles(*roles: str):
             raise HTTPException(403, "Keine Berechtigung für diese Aktion")
         return p
     return dep
+
+
+def require_user_admin(p: Principal = Depends(current_principal)) -> Principal:
+    """Benutzerverwaltung: globale Administratoren und Bereichs-Administratoren (nur für Benutzer ihres Bereichs)."""
+    if p.kind != "user" or not p.can_administer_users:
+        raise HTTPException(403, "Nur für Administratoren")
+    return p

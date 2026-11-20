@@ -2,7 +2,8 @@
   <div class="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-900 px-4">
     <form @submit.prevent="submit" :class="card" class="w-full max-w-sm p-6 space-y-4">
       <div class="text-center">
-        <div class="text-lg font-bold text-ks-700 dark:text-ks-300">OpenPatchPlanning</div>
+        <img src="/logo.svg" alt="" class="w-14 h-14 mx-auto mb-2" />
+        <div class="text-lg font-bold text-ks-700 dark:text-ks-300">Portwerk</div>
         <div class="text-xs text-slate-400">Patchplanung</div>
       </div>
       <p v-if="error" class="text-sm bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300 rounded-lg px-3 py-2">{{ error }}</p>

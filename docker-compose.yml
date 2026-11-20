@@ -1,13 +1,18 @@
 services:
-  openpatchplanning:
+  portwerk:
     build: .
-    image: openpatchplanning:latest
+    image: portwerk:latest
     restart: unless-stopped
     ports:
       - "8084:8084"
+      # HTTPS (TLS_PORT) und ACME-HTTP-01 (die CA ruft http://<Domain>:80/.well-known/acme-challenge/ ab):
+      # - "8443:8443"
+      # - "80:8084"
     environment:
+      # HTTPS-Listener mit dem in der Verwaltung (Zertifikat) per ACME ausgestellten Zertifikat; leer = aus
+      # TLS_PORT: "8443"
       # Start-Admin (nur beim ersten Start, solange es noch keinen Benutzer gibt).
-      # Leer lassen = Zufallspasswort erscheint im Log: docker compose logs openpatchplanning
+      # Leer lassen = Zufallspasswort erscheint im Log: docker compose logs portwerk
       OPP_ADMIN_PASSWORD: ${OPP_ADMIN_PASSWORD:-}
     volumes:
       - opp-data:/data

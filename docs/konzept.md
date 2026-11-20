@@ -1,4 +1,4 @@
-# OpenPatchPlanning – Konzept
+# Portwerk – Konzept
 
 Stand: Konzeptphase (Entwurf zur Abstimmung, noch kein Code).
 
@@ -106,12 +106,12 @@ nicht mehr vorkommen, werden markiert (`last_seen`), nicht gelöscht.
 ## 6. Schnittstelle zu OpenPlan
 
 OpenPlan bietet bereits API-Zugänge (Token `op_…`), **externe Referenzen je Vorgang**, Rückmeldungen (`POST /api/tasks/{id}/events`) und
-signierte **Webhooks**. OpenPatchPlanning nutzt genau diese Mittel – dasselbe Muster wie die AutoPatch-Anbindung.
+signierte **Webhooks**. Portwerk nutzt genau diese Mittel – dasselbe Muster wie die AutoPatch-Anbindung.
 
-**Richtung 1 – OpenPatchPlanning → OpenPlan**
+**Richtung 1 – Portwerk → OpenPlan**
 1. Pro Patchauftrag wird der zugehörige Vorgang gesucht: Gerät per Hostname (`GET /api/projects/{pid}/lookup?hostname=…`), darunter der Schritt,
    dessen Name zu `patch|verkabel|umstecken` passt (überschreibbar je Auftrag).
-2. Am Vorgang wird die Referenz gesetzt: System `openpatchplanning`, Wert `PA-0042`, Link zum Auftrag.
+2. Am Vorgang wird die Referenz gesetzt: System `portwerk`, Wert `PA-0042`, Link zum Auftrag.
 3. Statuswechsel werden zurückgemeldet:
 
    | Auftrag | OpenPlan-Vorgang |
@@ -121,19 +121,19 @@ signierte **Webhooks**. OpenPatchPlanning nutzt genau diese Mittel – dasselbe 
    | Abweichung / Nacharbeit | blockiert (Notiz mit Grund) |
    | Abgebrochen/Abgelehnt | unverändert + Notiz |
 
-**Richtung 2 – OpenPlan → OpenPatchPlanning (Webhooks)**
-`task.status`, `task.assigned`, `task.blocked` für Vorgänge mit Referenz `openpatchplanning`: Terminänderung, Verantwortlicher und Blockade
+**Richtung 2 – OpenPlan → Portwerk (Webhooks)**
+`task.status`, `task.assigned`, `task.blocked` für Vorgänge mit Referenz `portwerk`: Terminänderung, Verantwortlicher und Blockade
 erscheinen am Auftrag (Signatur `X-OpenPlan-Signature` wird geprüft, Wiederholungen abgewehrt).
 
 **Richtung 3 (später) – Geräte aus OpenPlan**
 Neue Geräte aus Geräte-Rollouts (Hostname, Standort, Typ) als Importquelle `openplan`, damit ein neu geplanter Switch ohne Doppelerfassung
 im Patchbestand erscheint.
 
-**Einrichtung:** in OpenPlan ein API-Zugang (Umfang `write`) und das Dienstkonto als Projektmitglied; in OpenPatchPlanning Adresse, Token,
+**Einrichtung:** in OpenPlan ein API-Zugang (Umfang `write`) und das Dienstkonto als Projektmitglied; in Portwerk Adresse, Token,
 Standardprojekt und Schrittnamen eintragen, „Verbindung testen“. Ein Fehler bei der Rückmeldung blockiert nie einen Auftrag; das Ergebnis der
 letzten Meldung steht in den Einstellungen.
 
-*Änderung in OpenPlan (klein):* das System `openpatchplanning` muss in der Liste der erlaubten Referenzsysteme stehen
+*Änderung in OpenPlan (klein):* das System `portwerk` muss in der Liste der erlaubten Referenzsysteme stehen
 (bisher `servicenow`, `awx`, `checkmk`, `jira`).
 
 ## 7. Rollen

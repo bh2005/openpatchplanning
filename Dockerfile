@@ -18,6 +18,6 @@ COPY --from=ui /ui/dist ./static
 RUN useradd --system --uid 10001 opp && mkdir /data && chown opp /data
 USER opp
 VOLUME /data
-EXPOSE 8084
+EXPOSE 8084 8443
 HEALTHCHECK --interval=30s --timeout=5s CMD python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8084/health')"
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8084"]
+CMD ["python", "-m", "app.serve"]

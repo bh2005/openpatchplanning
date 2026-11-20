@@ -33,6 +33,13 @@ def conn() -> Iterator[sqlite3.Connection]:
         c.close()
 
 
+@contextlib.contextmanager
+def transaction() -> Iterator[sqlite3.Connection]:
+    """Mehrere Schreibzugriffe atomar: alles oder nichts (Rollback bei Fehler), andere Zugriffe warten."""
+    with _lock, conn() as c:
+        yield c
+
+
 def migrate() -> list[str]:
     """Wendet alle noch nicht angewendeten Migrationen (migrations/NNNN_name.sql) der Reihe nach an."""
     applied: list[str] = []

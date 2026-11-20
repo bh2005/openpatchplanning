@@ -2,7 +2,15 @@
   <div class="max-w-6xl space-y-4">
     <div class="flex items-center justify-between">
       <h1 class="text-lg font-semibold text-slate-800 dark:text-slate-100">Geräte <span class="text-sm font-normal text-slate-400">({{ total }})</span></h1>
-      <button v-if="canWrite" @click="openNew" :class="btnPrimary">+ Gerät</button>
+      <div v-if="canWrite || canOrder" class="flex gap-2">
+        <button @click="wizard = 'switch'" :class="btnPrimary">Assistent: Gerät platzieren</button>
+        <button @click="wizard = 'patchpanel'" :class="btnPrimary">Assistent: Patchfeld</button>
+        <button @click="wizard = 'vertical'" :class="btnGhost">Hochkant (PDU …)</button>
+        <button @click="cableWizard = true" :class="btnPrimary">Assistent: Kabel einbauen</button>
+        <button @click="bulkWizard = true" :class="btnPrimary">Assistent: Massenverkabelung</button>
+        <button @click="wizard = 'placeholder'" :class="btnGhost">Platzhalter einplanen</button>
+        <button v-if="canWrite" @click="openNew" :class="btnGhost">+ Gerät (einfach)</button>
+      </div>
     </div>
 
     <div class="flex flex-wrap gap-2">
@@ -22,7 +30,9 @@
         <tbody>
           <tr v-if="!items.length"><td colspan="8" class="px-3 py-6 text-center text-slate-400">Keine Geräte gefunden.</td></tr>
           <tr v-for="d in items" :key="d.id" class="border-t border-slate-100 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/30">
-            <td :class="td"><router-link :to="`/devices/${d.id}`" class="text-ks-600 dark:text-ks-400 hover:underline font-medium">{{ d.hostname }}</router-link></td>
+            <td :class="td"><router-link :to="`/devices/${d.id}`" class="text-ks-600 dark:text-ks-400 hover:underline font-medium">{{ d.hostname }}</router-link>
+              <div v-if="d.former_hostname" class="text-[11px] text-slate-400">ehemals {{ d.former_hostname }}</div>
+              <div v-else-if="d.planned_hostname" class="text-[11px] text-amber-600">wird nach dem Rückbau zu „{{ d.planned_hostname }}“</div></td>
             <td :class="td">{{ typeLabel(d.type) }}</td>
             <td :class="td" class="text-slate-500">{{ [d.vendor, d.model].filter(Boolean).join(' ') || '–' }}</td>
             <td :class="td" class="font-mono text-xs">{{ d.mgmt_ip || '–' }}</td>
@@ -56,6 +66,9 @@
         <button @click="create" :class="btnPrimary" :disabled="!form.hostname">Anlegen</button>
       </template>
     </ModalDialog>
+    <CableWizard v-if="cableWizard" @close="cableWizard = false" @done="cableDone" />
+    <BulkCableWizard v-if="bulkWizard" @close="bulkWizard = false" @done="bulkDone" />
+    <DeviceWizard v-if="wizard" :kind="wizard" :title="TITLES[wizard]" @close="wizard = null" @done="wizardDone" />
   </div>
 </template>
 
@@ -63,11 +76,20 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import ModalDialog from '../components/ModalDialog.vue'
-import { api, errText, isAdmin } from '../api.js'
+import { api, errText, canWriteMaster, hasRole } from '../api.js'
+import DeviceWizard from '../components/DeviceWizard.vue'
+import CableWizard from '../components/CableWizard.vue'
+import BulkCableWizard from '../components/BulkCableWizard.vue'
 import { inp, lbl, card, th, td, btnPrimary, btnGhost, DEVICE_TYPES, DEVICE_STATUS, SOURCES, typeLabel, statusLabel, sourceLabel, statusClass } from '../ui.js'
 
 const router = useRouter(), route = useRoute()
-const canWrite = isAdmin()
+const canWrite = canWriteMaster()
+const canOrder = hasRole('planer')
+const wizard = ref(null), cableWizard = ref(false), bulkWizard = ref(false)
+function bulkDone(r) { bulkWizard.value = false; if (r.workorder) router.push(`/workorders/${r.workorder.id}`); else reload() }
+async function cableDone() { cableWizard.value = false; reload() }
+const TITLES = { switch: 'Assistent: Gerät platzieren', patchpanel: 'Assistent: Patchfeld platzieren', placeholder: 'Assistent: Platzhalter einplanen', vertical: 'Assistent: Hochkant-Gerät (PDU …) platzieren' }
+async function wizardDone() { wizard.value = null; reload() }
 const limit = 50
 const items = ref([]), total = ref(0), offset = ref(0), sites = ref([]), error = ref('')
 const f = reactive({ q: '', type: '', status: '', source: '', site_id: '', location_id: route.query.location_id || '' })

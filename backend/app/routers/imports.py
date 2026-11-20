@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .. import audit, checkmk, db, importer
+from .. import access, audit, checkmk, compare, db, importer
 from ..auth import Principal, current_principal, require_master_write
 
 router = APIRouter(prefix="/api/import", tags=["import"])
@@ -140,6 +140,7 @@ def json_import(body: JsonImport, me: Principal = Depends(require_master_write))
 class CheckmkHost(BaseModel):
     host: str = Field(min_length=1, max_length=120)
     inventory: dict[str, Any]
+    location: Optional[dict[str, str]] = None        # {"code": "SITE01", "name": "Werk Nord"} aus dem Checkmk-Tag (siehe tools/checkmk_export.py)
 
 
 class CheckmkImport(BaseModel):
@@ -161,13 +162,14 @@ def checkmk_import(body: CheckmkImport, me: Principal = Depends(require_master_w
     if not records:
         raise HTTPException(400, "Kein Host mit Interfaces im Inventar (alle %d Hosts übersprungen)" % len(skipped))
     result = importer.run(records, "checkmk", me.name, body.dry_run, body.atomic, body.create_locations)
+    nb = {} if body.dry_run else compare.store(lldp)                    # LLDP/CDP-Nachbarn für den Soll/Ist-Abgleich
     audit.log(me.name, "import.checkmk", "import", result["run_id"],
               f"{'Trockenlauf ' if body.dry_run else ''}{result['stats']} übersprungen={len(skipped)} lldp_hosts={len(lldp)}")
-    return {**result, "skipped_hosts": skipped[:200], "skipped_count": len(skipped), "lldp_hosts": len(lldp)}
+    return {**result, "skipped_hosts": skipped[:200], "skipped_count": len(skipped), "lldp_hosts": len(lldp), "neighbors": nb}
 
 
 @router.get("/runs")
-def list_runs(limit: int = 50, _: Principal = Depends(current_principal)):
+def list_runs(limit: int = 50, _: Principal = Depends(access.require_global)):
     runs = db.rows("SELECT * FROM import_runs ORDER BY id DESC LIMIT ?", (max(1, min(limit, 500)),))
     for r in runs:
         r["stats"] = json.loads(r["stats"] or "{}")
@@ -176,7 +178,7 @@ def list_runs(limit: int = 50, _: Principal = Depends(current_principal)):
 
 
 @router.get("/runs/{rid}")
-def get_run(rid: int, _: Principal = Depends(current_principal)):
+def get_run(rid: int, _: Principal = Depends(access.require_global)):
     r = db.row("SELECT * FROM import_runs WHERE id = ?", (rid,))
     if not r:
         raise HTTPException(404, "Importlauf nicht gefunden")

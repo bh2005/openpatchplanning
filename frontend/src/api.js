@@ -9,8 +9,18 @@ export function setUser(u)   { localStorage.setItem(USER_KEY, JSON.stringify(u |
 export function getUser()    { try { return JSON.parse(localStorage.getItem(USER_KEY) || '{}') } catch { return {} } }
 export function clearToken() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY) }
 export function isLoggedIn() { return !!getToken() }
-export function isAdmin()    { return (getUser().roles || []).includes('admin') }
-export function hasRole(...roles) { const r = getUser().roles || []; return r.includes('admin') || roles.some(x => r.includes(x)) }
+export function isAdmin()    { return (getUser().roles || []).includes('admin') }                       // globaler Administrator
+export function isGlobal()   { return (getUser().roles || []).length > 0 }                              // mindestens eine globale Rolle: sieht alles
+export function scopesOf()   { return getUser().scopes || [] }                                          // Rollen nur für bestimmte Standorte
+export function isSiteAdmin() { return scopesOf().some(s => s.role === 'admin') }                       // Bereichs-Administrator irgendeines Standorts
+export function siteAdminIds() { return scopesOf().filter(s => s.role === 'admin').map(s => s.site_id) }
+export function canWriteMaster() { return isAdmin() || isSiteAdmin() }                                  // Stammdaten ändern (Server prüft den Standort)
+export function canAdministerUsers() { return isAdmin() || isSiteAdmin() }
+/** Rolle global oder an irgendeinem Standort – nur für Menüs und Schaltflächen, die Rechte prüft immer der Server. */
+export function hasRole(...roles) {
+  const r = getUser().roles || []
+  return r.includes('admin') || roles.some(x => r.includes(x)) || scopesOf().some(s => s.role === 'admin' || roles.includes(s.role))
+}
 
 const http = axios.create({ baseURL: '' })
 
@@ -33,8 +43,15 @@ http.interceptors.response.use(r => r, err => {
 export function errText(e, fallback = 'Fehler') {
   const d = e?.response?.data?.detail
   if (typeof d === 'string') return d
+  if (d && typeof d === 'object' && !Array.isArray(d) && d.message) return d.message
   if (Array.isArray(d)) return d.map(x => `${(x.loc || []).slice(1).join('.')}: ${x.msg}`).join('; ')
   return fallback
+}
+
+/** Rückfrage-Antwort des Servers („Port belegt“, „HE belegt“): liefert {code, message, conflicts} oder null. */
+export function conflictOf(e) {
+  const d = e?.response?.data?.detail
+  return e?.response?.status === 409 && d && typeof d === 'object' && ['port_busy', 'slot_busy'].includes(d.code) ? d : null
 }
 
 const get  = (url, params) => http.get(url, { params }).then(r => r.data)
@@ -61,6 +78,7 @@ export const api = {
   createLocation: b => post('/api/locations', b),
   updateLocation: (id, b) => put(`/api/locations/${id}`, b),
   deleteLocation: id => del(`/api/locations/${id}`),
+  moveLocation:   (id, b) => post(`/api/locations/${id}/move`, b),
 
   // Geräte und Ports
   devices:      params => get('/api/devices', params),
@@ -76,6 +94,42 @@ export const api = {
   setCable:     (id, body) => put(`/api/ports/${id}/cable`, body),
   cables:       params => get('/api/cables', params),
   updateCable:  (id, body) => put(`/api/cables/${id}`, body),
+
+  // Assistenten
+  deviceWizard:     b => post('/api/wizards/device', b),
+  cableWizard:      b => post('/api/wizards/cable', b),
+  portList:         spec => post('/api/wizards/port-list', spec),
+  bulkCables:       b => post('/api/wizards/bulk-cables', b),
+  bulkParse:        text => post('/api/wizards/bulk-cables/parse', { text }),
+  bulkItems:        (wid, b) => post(`/api/workorders/${wid}/items/bulk`, b),
+  exportWorkorder:  id => http.get(`/api/workorders/${id}/export`, { responseType: 'blob' }).then(r => r.data),
+  patchlist:        (ids, group, only_open) => get('/api/patchlists', { ids, group, only_open }),
+  patchlistExport:  (ids, group, only_open) => http.get('/api/patchlists/export', { params: { ids, group, only_open }, responseType: 'blob' }).then(r => r.data),
+  rackSlots:        (locationId, height_u, extra = {}) => get(`/api/wizards/rack-slots/${locationId}`, { height_u, ...extra }),
+  siteWizard:       b => post('/api/wizards/site', b),
+
+  // Katalog: Kabelarten und Gerätemodelle
+  cableTypes:       all => get('/api/cable-types', all ? { all: true } : {}),
+  createCableType:  b => post('/api/cable-types', b),
+  updateCableType:  (id, b) => put(`/api/cable-types/${id}`, b),
+  deleteCableType:  id => del(`/api/cable-types/${id}`),
+  deviceModels:     params => get('/api/device-models', params),
+  createModel:      b => post('/api/device-models', b),
+  updateModel:      (id, b) => put(`/api/device-models/${id}`, b),
+  deleteModel:      id => del(`/api/device-models/${id}`),
+  portsFromModel:   (did, model_id) => post(`/api/devices/${did}/ports/from-model`, { model_id }),
+
+  // WAN-Verbindungen
+  search:         q => get('/api/search', { q }),
+  checkmkLink:    () => get('/api/integrations/checkmk'),
+  saveCheckmkLink: b => put('/api/admin/checkmk', b),
+  compare:        params => get('/api/compare', params),
+  wanMeta:        () => get('/api/wan/meta'),
+  wanLinks:       params => get('/api/wan', params),
+  wanLink:        id => get(`/api/wan/${id}`),
+  createWan:      b => post('/api/wan', b),
+  updateWan:      (id, b) => put(`/api/wan/${id}`, b),
+  deleteWan:      id => del(`/api/wan/${id}`),
 
   // Patchaufträge
   workorders:        params => get('/api/workorders', params),
@@ -114,4 +168,31 @@ export const api = {
   createToken:    b => post('/api/tokens', b),
   revokeToken:    id => del(`/api/tokens/${id}`),
   audit:          params => get('/api/audit', params),
+  ldapSettings:     () => get('/api/admin/ldap'),
+  saveLdapSettings: b => put('/api/admin/ldap', b),
+  testLdap:         (settings, username, password) => post('/api/admin/ldap/test', { settings, username, password }),
+  openplanSettings:     () => get('/api/admin/openplan'),
+  saveOpenplanSettings: b => put('/api/admin/openplan', b),
+  testOpenplan:         () => post('/api/admin/openplan/test'),
+  openplanStatus:       () => get('/api/openplan/status'),
+  openplanProjects:     () => get('/api/openplan/projects'),
+  openplanTasks:        (pid, q) => get(`/api/openplan/projects/${pid}/tasks`, q ? { q } : {}),
+  openplanLink:         (wid, b) => post(`/api/workorders/${wid}/openplan/link`, b),
+  openplanCreate:       (wid, b) => post(`/api/workorders/${wid}/openplan/create`, b),
+  openplanSync:         wid => post(`/api/workorders/${wid}/openplan/sync`),
+  openplanUnlink:       wid => del(`/api/workorders/${wid}/openplan`),
+  openplanOrders:       b => post('/api/openplan/orders', b),
+  openplanProject:      b => post('/api/openplan/projects', b),
+  mailSettings:     () => get('/api/admin/mail'),
+  saveMailSettings: b => put('/api/admin/mail', b),
+  testMail:         to => post('/api/admin/mail/test', { to }),
+  directoryUsers:   wid => get('/api/directory/users', wid ? { workorder_id: wid } : {}),
+  sendWorkorder:    (id, b) => post(`/api/workorders/${id}/send`, b),
+  sendPatchlist:    b => post('/api/patchlists/send', b),
+  assignWorkorder:  (id, b) => post(`/api/workorders/${id}/assign`, b),
+  tls:              () => get('/api/admin/tls'),
+  saveTls:          b => put('/api/admin/tls', b),
+  fetchTlsCa:       url => post('/api/admin/tls/fetch-ca', { url }),
+  issueTls:         () => post('/api/admin/tls/issue'),
+  tlsCert:          () => http.get('/api/admin/tls/cert', { responseType: 'blob' }).then(r => r.data),
 }

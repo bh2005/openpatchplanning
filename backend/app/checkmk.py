@@ -8,7 +8,7 @@ Genutzte Knoten
   * ``hardware.components.chassis``      Hersteller, Modell, Seriennummer
   * ``hardware.system``                  Produktbezeichnung (Fallback für das Modell)
   * ``networking.addresses``             Management-IP
-  * ``networking.lldp_cache.neighbors``  LLDP-Nachbarn je Port (für den Soll/Ist-Abgleich, Etappe 3)
+  * ``networking.lldp_cache.neighbors`` / ``networking.cdp_cache.neighbors``  LLDP-/CDP-Nachbarn je Port (Soll/Ist-Abgleich)
 """
 from __future__ import annotations
 
@@ -91,9 +91,31 @@ def lldp_neighbors(tree: dict) -> list[dict]:
         if key in seen:
             continue
         seen.add(key)
-        out.append({"local_port": local, "neighbor_name": name, "neighbor_port": str(n.get("neighbor_port") or ""),
+        out.append({"protocol": "lldp", "local_port": local, "neighbor_name": name, "neighbor_port": str(n.get("neighbor_port") or ""),
                     "neighbor_address": str(n.get("neighbor_address") or ""), "capabilities": str(n.get("capabilities") or "")})
     return out
+
+
+def cdp_neighbors(tree: dict) -> list[dict]:
+    """CDP-Nachbarn je lokalem Port (``networking.cdp_cache.neighbors``)."""
+    out, seen = [], set()
+    for n in rows(tree, "networking.cdp_cache.neighbors"):
+        local = str(n.get("local_port") or "").strip()
+        name = str(n.get("neighbor_name") or "").strip()
+        if not local or not name:
+            continue
+        key = (local, name.split(".")[0].lower(), str(n.get("neighbor_port") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"protocol": "cdp", "local_port": local, "neighbor_name": name, "neighbor_port": str(n.get("neighbor_port") or ""),
+                    "neighbor_address": str(n.get("neighbor_address") or ""), "capabilities": str(n.get("capabilities") or "")})
+    return out
+
+
+def has_neighbor_data(tree: dict) -> bool:
+    """Meldet der Host LLDP/CDP-Daten (auch ohne Nachbarn)? Dann gilt „kein Nachbar gesehen“ als Aussage."""
+    return bool(node(tree, "networking.lldp_cache") or node(tree, "networking.cdp_cache"))
 
 
 def device_from_inventory(host: str, tree: dict, site_code: str = "", include_all_interfaces: bool = False) -> Optional[dict]:
@@ -146,8 +168,12 @@ def records_from_hosts(hosts: list[dict], site_code: str = "", include_all_inter
             else:
                 skipped.append(name)
                 continue
+        loc = h.get("location") or {}
+        if not site_code and loc.get("code"):                      # Standort aus dem Checkmk-Tag (Tool: --location-tag)
+            rec["location"], rec["site_hint"] = str(loc["code"]).strip(), True
+            if loc.get("name"):
+                rec["site_name"] = str(loc["name"]).strip()
         records.append(rec)
-        nb = lldp_neighbors(tree)
-        if nb:
-            lldp[name] = nb
+        if has_neighbor_data(tree):
+            lldp[name] = lldp_neighbors(tree) + cdp_neighbors(tree)       # auch leere Liste: der Host liefert Nachbardaten
     return records, lldp, skipped

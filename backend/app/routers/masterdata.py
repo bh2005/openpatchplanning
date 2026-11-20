@@ -1,6 +1,7 @@
 """Standorte, Locations (Gebäude/Etage/Raum/Rack), Geräte und Ports."""
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import time
@@ -8,10 +9,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from .. import audit, db
+from .. import access, audit, db
+from ..access import require_writer
+from ..rackmount import check_mount, describe, pending_removal_device_ids, rack_conflicts
 from ..auth import Principal, current_principal, require_master_write
-from ..schemas import (CABLE_TYPES, DEVICE_STATUS, DEVICE_TYPES, LOCATION_KINDS, PORT_MEDIA, CableIn, DeviceIn,
-                       LocationIn, PeerIn, PortBulkIn, PortIn, SiteIn)
+from .catalog import check_cable_type
+from ..schemas import (CONTAINER_KINDS, DEVICE_STATUS, DEVICE_TYPES, LOCATION_KINDS, PORT_MEDIA, MoveIn, CableIn, DeviceIn,
+                       LocationIn, ModelRef, PeerIn, PortBulkIn, PortGroup, PortIn, SiteIn)
 
 router = APIRouter(prefix="/api", tags=["stammdaten"])
 
@@ -34,10 +38,11 @@ def sort_ports(ports: list[dict]) -> list[dict]:
 # ── Standorte ─────────────────────────────────────────────────────────────────
 
 @router.get("/sites")
-def list_sites(_: Principal = Depends(current_principal)):
-    return db.rows("""SELECT s.*, (SELECT COUNT(*) FROM locations l WHERE l.site_id = s.id) AS locations,
+def list_sites(me: Principal = Depends(current_principal)):
+    cl, args = access.sites_clause(me, "s.id")
+    return db.rows(f"""SELECT s.*, (SELECT COUNT(*) FROM locations l WHERE l.site_id = s.id) AS locations,
                              (SELECT COUNT(*) FROM devices d JOIN locations l ON l.id = d.location_id WHERE l.site_id = s.id) AS devices
-                      FROM sites s ORDER BY s.code""")
+                      FROM sites s {('WHERE ' + cl) if cl else ''} ORDER BY s.code""", tuple(args))
 
 
 @router.post("/sites", status_code=201)
@@ -52,9 +57,10 @@ def create_site(body: SiteIn, me: Principal = Depends(require_master_write)):
 
 
 @router.put("/sites/{sid}")
-def update_site(sid: int, body: SiteIn, me: Principal = Depends(require_master_write)):
+def update_site(sid: int, body: SiteIn, me: Principal = Depends(require_writer)):
     if not db.row("SELECT id FROM sites WHERE id = ?", (sid,)):
         raise HTTPException(404, "Standort nicht gefunden")
+    access.require_write(me, sid)
     try:
         db.execute("UPDATE sites SET code=?, name=?, address=?, note=? WHERE id=?",
                    (body.code.strip(), body.name.strip(), body.address.strip(), body.note.strip(), sid))
@@ -100,8 +106,8 @@ def _check_location(body: LocationIn, own_id: Optional[int] = None) -> None:
     _one_of(body.kind, LOCATION_KINDS, "Art")
     if not db.row("SELECT id FROM sites WHERE id = ?", (body.site_id,)):
         raise HTTPException(400, "Standort nicht gefunden")
-    if body.kind != "rack" and body.rack_units is not None:
-        raise HTTPException(400, "Höheneinheiten gibt es nur bei Racks")
+    if body.kind not in CONTAINER_KINDS and body.rack_units is not None:
+        raise HTTPException(400, "Höheneinheiten gibt es nur bei Racks, Wandgehäusen und Schaltschränken")
     if body.parent_id:
         p = db.row("SELECT * FROM locations WHERE id = ?", (body.parent_id,))
         if not p or p["site_id"] != body.site_id:
@@ -116,40 +122,81 @@ def _check_location(body: LocationIn, own_id: Optional[int] = None) -> None:
 
 
 @router.get("/locations")
-def list_locations(site_id: Optional[int] = None, _: Principal = Depends(current_principal)):
-    sql = "SELECT l.*, (SELECT COUNT(*) FROM devices d WHERE d.location_id = l.id) AS devices FROM locations l"
-    rows = db.rows(sql + (" WHERE l.site_id = ?" if site_id else "") + " ORDER BY l.site_id, l.parent_id, l.name",
-                   (site_id,) if site_id else ())
+def list_locations(site_id: Optional[int] = None, me: Principal = Depends(current_principal)):
+    where, args = [], []
+    if site_id:
+        where.append("l.site_id = ?"); args.append(site_id)
+    cl, a2 = access.sites_clause(me, "l.site_id")
+    if cl:
+        where.append(cl); args += a2
+    rows = db.rows("SELECT l.*, (SELECT COUNT(*) FROM devices d WHERE d.location_id = l.id) AS devices FROM locations l"
+                   + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY l.site_id, l.parent_id, l.name", tuple(args))
     for r in rows:
         r["path"] = location_path(r["id"])
     return rows
 
 
 @router.post("/locations", status_code=201)
-def create_location(body: LocationIn, me: Principal = Depends(require_master_write)):
+def create_location(body: LocationIn, me: Principal = Depends(require_writer)):
+    access.require_write(me, body.site_id)
     _check_location(body)
-    lid = db.execute("INSERT INTO locations(site_id, parent_id, kind, name, rack_units, note) VALUES (?,?,?,?,?,?)",
-                     (body.site_id, body.parent_id, body.kind, body.name.strip(), body.rack_units, body.note.strip()))
+    lid = db.execute("INSERT INTO locations(site_id, parent_id, kind, name, rack_units, note, ident) VALUES (?,?,?,?,?,?,?)",
+                     (body.site_id, body.parent_id, body.kind, body.name.strip(), body.rack_units, body.note.strip(), body.ident.strip()))
     audit.log(me.name, "location.create", "location", lid, f"{body.kind} {body.name}")
     return {**db.row("SELECT * FROM locations WHERE id = ?", (lid,)), "path": location_path(lid)}
 
 
 @router.put("/locations/{lid}")
-def update_location(lid: int, body: LocationIn, me: Principal = Depends(require_master_write)):
-    if not db.row("SELECT id FROM locations WHERE id = ?", (lid,)):
+def update_location(lid: int, body: LocationIn, me: Principal = Depends(require_writer)):
+    cur = db.row("SELECT * FROM locations WHERE id = ?", (lid,))
+    if not cur:
         raise HTTPException(404, "Location nicht gefunden")
+    access.require_write(me, cur["site_id"])
+    access.require_write(me, body.site_id)
     _check_location(body, own_id=lid)
-    db.execute("UPDATE locations SET site_id=?, parent_id=?, kind=?, name=?, rack_units=?, note=? WHERE id=?",
-               (body.site_id, body.parent_id, body.kind, body.name.strip(), body.rack_units, body.note.strip(), lid))
+    db.execute("UPDATE locations SET site_id=?, parent_id=?, kind=?, name=?, rack_units=?, note=?, ident=? WHERE id=?",
+               (body.site_id, body.parent_id, body.kind, body.name.strip(), body.rack_units, body.note.strip(), body.ident.strip(), lid))
     audit.log(me.name, "location.update", "location", lid, body.name)
     return {**db.row("SELECT * FROM locations WHERE id = ?", (lid,)), "path": location_path(lid)}
 
 
-@router.delete("/locations/{lid}")
-def delete_location(lid: int, me: Principal = Depends(require_master_write)):
+@router.post("/locations/{lid}/move")
+def move_location(lid: int, body: MoveIn, me: Principal = Depends(require_writer)):
+    """Verlegt eine Location (z. B. eine mobile Maschine/ein Lader) samt allem darunter – Gehäuse und Geräte – an einen anderen
+    Standort bzw. unter eine andere Location. Beide Standorte müssen für dich beschreibbar sein."""
     loc = db.row("SELECT * FROM locations WHERE id = ?", (lid,))
     if not loc:
         raise HTTPException(404, "Location nicht gefunden")
+    access.require_write(me, loc["site_id"])
+    access.require_write(me, body.site_id)
+    new_site = db.row("SELECT * FROM sites WHERE id = ?", (body.site_id,))
+    if not new_site:
+        raise HTTPException(400, "Standort nicht gefunden")
+    if body.parent_id:
+        parent = db.row("SELECT * FROM locations WHERE id = ?", (body.parent_id,))
+        if not parent or parent["site_id"] != body.site_id:
+            raise HTTPException(400, "Die übergeordnete Location muss zum Zielstandort gehören")
+        if parent["kind"] in CONTAINER_KINDS:
+            raise HTTPException(400, "Racks, Wandgehäuse und Schaltschränke nehmen nur Geräte auf")
+        subtree = _location_and_children(lid)
+        if parent["id"] in subtree:
+            raise HTTPException(400, "Eine Location kann nicht in sich selbst oder ihre Unterstruktur verlegt werden")
+    old_path = location_path(lid)
+    subtree = _location_and_children(lid)
+    db.execute(f"UPDATE locations SET site_id = ? WHERE id IN ({','.join('?' * len(subtree))})", (body.site_id, *subtree))
+    db.execute("UPDATE locations SET parent_id = ? WHERE id = ?", (body.parent_id, lid))
+    new_path = location_path(lid)
+    audit.log(me.name, "location.move", "location", lid, f"{old_path} -> {new_path} ({len(subtree)} Locations, "
+              f"{db.row('SELECT COUNT(*) AS n FROM devices WHERE location_id IN (%s)' % ','.join('?' * len(subtree)), tuple(subtree))['n']} Geräte)")
+    return {**db.row("SELECT * FROM locations WHERE id = ?", (lid,)), "path": new_path, "old_path": old_path}
+
+
+@router.delete("/locations/{lid}")
+def delete_location(lid: int, me: Principal = Depends(require_writer)):
+    loc = db.row("SELECT * FROM locations WHERE id = ?", (lid,))
+    if not loc:
+        raise HTTPException(404, "Location nicht gefunden")
+    access.require_write(me, loc["site_id"])
     if db.row("SELECT COUNT(*) AS n FROM locations WHERE parent_id = ?", (lid,))["n"]:
         raise HTTPException(409, "Die Location enthält noch untergeordnete Locations")
     n = db.row("SELECT COUNT(*) AS n FROM devices WHERE location_id = ?", (lid,))["n"]
@@ -182,9 +229,12 @@ def list_devices(
     q: str = "", type: str = "", status: str = "", source: str = "",
     site_id: Optional[int] = None, location_id: Optional[int] = None,
     limit: int = Query(100, ge=1, le=1000), offset: int = Query(0, ge=0),
-    _: Principal = Depends(current_principal),
+    me: Principal = Depends(current_principal),
 ):
     where, args = [], []
+    cl, a2 = access.device_clause(me, "d")
+    if cl:
+        where.append(cl); args += a2
     if q.strip():
         like = f"%{q.strip()}%"
         where.append("(d.hostname LIKE ? OR d.model LIKE ? OR d.serial LIKE ? OR d.mgmt_ip LIKE ? OR d.note LIKE ?)")
@@ -203,64 +253,102 @@ def list_devices(
     return {"total": total, "items": [_device_out(d) for d in items]}
 
 
-def _check_device(body: DeviceIn, own_id: Optional[int] = None) -> None:
+def _model_or_400(model_id: Optional[int]) -> Optional[dict]:
+    if not model_id:
+        return None
+    m = db.row("SELECT * FROM device_models WHERE id = ?", (model_id,))
+    if not m:
+        raise HTTPException(400, "Katalogmodell nicht gefunden")
+    return m
+
+
+def _check_device(body: DeviceIn, own_id: Optional[int] = None, ignore_ids: tuple = ()) -> None:
     _one_of(body.type, DEVICE_TYPES, "Typ")
     _one_of(body.status, DEVICE_STATUS, "Status")
+    body.side_slot = check_mount(body.orientation, body.mount_side, body.side_slot)
     loc = db.row("SELECT * FROM locations WHERE id = ?", (body.location_id,)) if body.location_id else None
     if body.location_id and not loc:
         raise HTTPException(400, "Location nicht gefunden")
+    in_container = bool(loc and loc["kind"] in CONTAINER_KINDS)
+    if body.orientation == "vertical" and not (loc and loc["kind"] == "rack"):
+        raise HTTPException(400, "Hochkant eingebaute Geräte (z. B. PDU) brauchen ein Rack (Seitenkanäle gibt es nur dort)")
+    if body.orientation == "din_rail" and not loc:
+        raise HTTPException(400, "Für die Montage auf Hutschiene/Montageplatte ist eine Location (Schaltschrank, Maschine …) nötig")
     if body.rack_position:
         if not loc:
             raise HTTPException(400, "Eine HE-Position braucht eine Location (Rack)")
-        if loc["kind"] != "rack":
-            raise HTTPException(400, "Eine HE-Position ist nur in einem Rack möglich")
+        if not in_container:
+            raise HTTPException(400, "Eine HE-Position ist nur in einem Rack, Wandgehäuse oder Schaltschrank möglich")
         top = body.rack_position + body.height_u - 1
         if loc["rack_units"] and top > loc["rack_units"]:
             raise HTTPException(400, f"Das Gerät passt nicht ins Rack ({loc['rack_units']} HE): belegt HE {body.rack_position}–{top}")
-        for o in db.rows("SELECT id, hostname, rack_position, height_u FROM devices WHERE location_id = ? AND rack_position IS NOT NULL",
-                         (loc["id"],)):
-            if o["id"] != own_id and not (top < o["rack_position"] or o["rack_position"] + o["height_u"] - 1 < body.rack_position):
-                raise HTTPException(409, f"HE {body.rack_position}–{top} überschneidet sich mit {o['hostname']} "
-                                         f"(HE {o['rack_position']}–{o['rack_position'] + o['height_u'] - 1})")
+    if in_container:
+        hit = rack_conflicts(loc, body.orientation, body.mount_side, body.side_slot, body.rack_position, body.height_u, own_id, ignore_ids)
+        if hit:
+            o = hit[0]
+            if body.orientation == "vertical":
+                raise HTTPException(409, f"Der Seitenkanal ist an dieser Stelle belegt durch {describe(o)}")
+            raise HTTPException(409, f"HE {body.rack_position}–{body.rack_position + body.height_u - 1} überschneidet sich mit {describe(o)}")
 
 
 @router.get("/devices/{did}")
-def get_device(did: int, _: Principal = Depends(current_principal)):
+def get_device(did: int, me: Principal = Depends(current_principal)):
     d = db.row("SELECT * FROM devices WHERE id = ?", (did,))
     if not d:
         raise HTTPException(404, "Gerät nicht gefunden")
+    access.require_read(me, access.site_of_location(d["location_id"]), "Gerät")
     d = _device_out(d)
     d["ports"] = sort_ports(_ports_with_cables(db.rows("SELECT * FROM ports WHERE device_id = ?", (did,))))
     return d
 
 
 @router.post("/devices", status_code=201)
-def create_device(body: DeviceIn, me: Principal = Depends(require_master_write)):
+def create_device(body: DeviceIn, me: Principal = Depends(require_writer)):
+    access.require_write(me, access.site_of_location(body.location_id))
     _check_device(body)
+    model = _model_or_400(body.model_id)
+    vendor = body.vendor.strip() or (model["vendor"] if model else "")
+    model_name = body.model.strip() or (model["model"] if model else "")
     now = time.time()
     try:
         did = db.execute(
             """INSERT INTO devices(hostname, type, vendor, model, serial, mgmt_ip, location_id, rack_position, height_u, status,
-                                   source, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (body.hostname.strip(), body.type, body.vendor.strip(), body.model.strip(), body.serial.strip(), body.mgmt_ip.strip(),
-             body.location_id, body.rack_position, body.height_u, body.status, "manual", body.note.strip(), now, now))
+                                   source, note, model_id, mount_side, orientation, side_slot, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (body.hostname.strip(), body.type, vendor, model_name, body.serial.strip(), body.mgmt_ip.strip(),
+             body.location_id, body.rack_position, body.height_u, body.status, "manual", body.note.strip(),
+             body.model_id, body.mount_side, body.orientation, body.side_slot, now, now))
     except sqlite3.IntegrityError:
         raise HTTPException(409, f"Ein Gerät mit dem Hostnamen '{body.hostname}' existiert bereits")
     audit.log(me.name, "device.create", "device", did, body.hostname)
+    if model and body.apply_model_ports:
+        created, _skipped = _apply_model_ports(did, model)
+        audit.log(me.name, "port.from_model", "device", did, f"{model['vendor']} {model['model']}: {created} angelegt")
     return _device_out(db.row("SELECT * FROM devices WHERE id = ?", (did,)))
 
 
 @router.put("/devices/{did}")
-def update_device(did: int, body: DeviceIn, me: Principal = Depends(require_master_write)):
-    if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
+def update_device(did: int, body: DeviceIn, me: Principal = Depends(require_writer)):
+    cur = db.row("SELECT * FROM devices WHERE id = ?", (did,))
+    if not cur:
         raise HTTPException(404, "Gerät nicht gefunden")
+    access.require_write(me, access.site_of_location(cur["location_id"]))           # bisheriger Standort
+    access.require_write(me, access.site_of_location(body.location_id))              # Ziel-Standort (Verschieben)
+    for f in ("mount_side", "orientation", "side_slot"):                      # nicht mitgesendete Felder bleiben unverändert
+        if f not in body.model_fields_set:
+            setattr(body, f, cur[f])
     _check_device(body, own_id=did)
+    _model_or_400(body.model_id)
+    if "model_id" in body.model_fields_set:
+        model_id = body.model_id
+    else:
+        model_id = db.row("SELECT model_id FROM devices WHERE id = ?", (did,))["model_id"]
     try:
         db.execute(
             """UPDATE devices SET hostname=?, type=?, vendor=?, model=?, serial=?, mgmt_ip=?, location_id=?, rack_position=?,
-                                  height_u=?, status=?, note=?, updated_at=? WHERE id=?""",
+                                  height_u=?, status=?, note=?, model_id=?, mount_side=?, orientation=?, side_slot=?, updated_at=? WHERE id=?""",
             (body.hostname.strip(), body.type, body.vendor.strip(), body.model.strip(), body.serial.strip(), body.mgmt_ip.strip(),
-             body.location_id, body.rack_position, body.height_u, body.status, body.note.strip(), time.time(), did))
+             body.location_id, body.rack_position, body.height_u, body.status, body.note.strip(), model_id, body.mount_side, body.orientation, body.side_slot, time.time(), did))
     except sqlite3.IntegrityError:
         raise HTTPException(409, f"Ein Gerät mit dem Hostnamen '{body.hostname}' existiert bereits")
     audit.log(me.name, "device.update", "device", did, body.hostname)
@@ -268,10 +356,11 @@ def update_device(did: int, body: DeviceIn, me: Principal = Depends(require_mast
 
 
 @router.delete("/devices/{did}")
-def delete_device(did: int, me: Principal = Depends(require_master_write)):
+def delete_device(did: int, me: Principal = Depends(require_writer)):
     d = db.row("SELECT * FROM devices WHERE id = ?", (did,))
     if not d:
         raise HTTPException(404, "Gerät nicht gefunden")
+    access.require_write(me, access.site_of_location(d["location_id"]))
     db.execute("DELETE FROM devices WHERE id = ?", (did,))          # Ports werden mit gelöscht (ON DELETE CASCADE)
     audit.log(me.name, "device.delete", "device", did, d["hostname"])
     return {"ok": True}
@@ -329,14 +418,16 @@ def _ports_with_cables(ports: list[dict]) -> list[dict]:
 
 
 @router.get("/devices/{did}/ports")
-def list_ports(did: int, _: Principal = Depends(current_principal)):
+def list_ports(did: int, me: Principal = Depends(current_principal)):
     if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
         raise HTTPException(404, "Gerät nicht gefunden")
+    access.require_read(me, access.site_of_device(did), "Gerät")
     return sort_ports(_ports_with_cables(db.rows("SELECT * FROM ports WHERE device_id = ?", (did,))))
 
 
 @router.post("/devices/{did}/ports", status_code=201)
-def create_port(did: int, body: PortIn, me: Principal = Depends(require_master_write)):
+def create_port(did: int, body: PortIn, me: Principal = Depends(require_writer)):
+    access.require_write(me, access.site_of_device(did))
     if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
         raise HTTPException(404, "Gerät nicht gefunden")
     _check_port(body)
@@ -352,44 +443,74 @@ def create_port(did: int, body: PortIn, me: Principal = Depends(require_master_w
     return _port_with_cable(db.row("SELECT * FROM ports WHERE id = ?", (pid,)))
 
 
-@router.post("/devices/{did}/ports/bulk", status_code=201)
-def create_ports_bulk(did: int, body: PortBulkIn, me: Principal = Depends(require_master_write)):
-    """Legt count Ports an. dual=True erzeugt je einen Vorder- (<prefix><n>) und Rückseiten-Port (<prefix><n><back_suffix>)
-    und setzt automatisch den Peer zwischen beiden."""
-    if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
-        raise HTTPException(404, "Gerät nicht gefunden")
-    _one_of(body.medium, PORT_MEDIA, "Medium")
+def _create_port_group(did: int, g) -> tuple[int, int]:
+    """Legt die Ports einer Gruppe (PortBulkIn oder PortGroup) an. dual=True erzeugt je einen Vorder- (<prefix><n>) und
+    Rückseiten-Port (<prefix><n><back_suffix>) und setzt automatisch den Peer. Liefert (angelegt, übersprungen)."""
     created = skipped = 0
-    for i in range(body.start, body.start + body.count):
-        front_name = f"{body.prefix}{i}"
+    for i in range(g.start, g.start + g.count):
+        front_name = f"{g.prefix}{i}"
         try:
             front_id = db.execute("INSERT INTO ports(device_id, name, idx, medium, speed_mbps) VALUES (?,?,?,?,?)",
-                                  (did, front_name, i, body.medium, body.speed_mbps))
+                                  (did, front_name, i, g.medium, g.speed_mbps))
             created += 1
         except sqlite3.IntegrityError:
             front_id = None
             skipped += 1
-        if body.dual:
-            back_name = f"{body.prefix}{i}{body.back_suffix}"
+        if g.dual:
+            back_name = f"{g.prefix}{i}{g.back_suffix}"
             try:
                 back_id = db.execute("INSERT INTO ports(device_id, name, idx, medium, speed_mbps) VALUES (?,?,?,?,?)",
-                                     (did, back_name, i, body.medium, body.speed_mbps))
+                                     (did, back_name, i, g.medium, g.speed_mbps))
                 created += 1
                 if front_id:
                     db.execute("UPDATE ports SET peer_port_id = ? WHERE id = ?", (back_id, front_id))
                     db.execute("UPDATE ports SET peer_port_id = ? WHERE id = ?", (front_id, back_id))
             except sqlite3.IntegrityError:
                 skipped += 1
+    return created, skipped
+
+
+@router.post("/devices/{did}/ports/bulk", status_code=201)
+def create_ports_bulk(did: int, body: PortBulkIn, me: Principal = Depends(require_writer)):
+    access.require_write(me, access.site_of_device(did))
+    """Legt count Ports an (siehe _create_port_group)."""
+    if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
+        raise HTTPException(404, "Gerät nicht gefunden")
+    _one_of(body.medium, PORT_MEDIA, "Medium")
+    created, skipped = _create_port_group(did, body)
     audit.log(me.name, "port.bulk_create", "device", did,
               f"{body.prefix}{body.start}..: {created} angelegt, {skipped} übersprungen" + (" (dual)" if body.dual else ""))
     return {"created": created, "skipped": skipped}
 
 
+def _apply_model_ports(did: int, model: dict) -> tuple[int, int]:
+    created = skipped = 0
+    for g in json.loads(model["ports"] or "[]"):
+        c, s = _create_port_group(did, PortGroup(**g))
+        created += c; skipped += s
+    return created, skipped
+
+
+@router.post("/devices/{did}/ports/from-model", status_code=201)
+def create_ports_from_model(did: int, body: ModelRef, me: Principal = Depends(require_writer)):
+    access.require_write(me, access.site_of_device(did))
+    """Erzeugt die Ports aus der Vorlage eines Katalogmodells (bereits vorhandene Portnamen werden übersprungen)."""
+    if not db.row("SELECT id FROM devices WHERE id = ?", (did,)):
+        raise HTTPException(404, "Gerät nicht gefunden")
+    model = db.row("SELECT * FROM device_models WHERE id = ?", (body.model_id,))
+    if not model:
+        raise HTTPException(404, "Modell nicht gefunden")
+    created, skipped = _apply_model_ports(did, model)
+    audit.log(me.name, "port.from_model", "device", did, f"{model['vendor']} {model['model']}: {created} angelegt, {skipped} übersprungen")
+    return {"created": created, "skipped": skipped}
+
+
 @router.put("/ports/{pid}")
-def update_port(pid: int, body: PortIn, me: Principal = Depends(require_master_write)):
+def update_port(pid: int, body: PortIn, me: Principal = Depends(require_writer)):
     p = db.row("SELECT * FROM ports WHERE id = ?", (pid,))
     if not p:
         raise HTTPException(404, "Port nicht gefunden")
+    access.require_write(me, access.site_of_device(p["device_id"]))
     _check_port(body)
     try:
         db.execute(
@@ -403,21 +524,23 @@ def update_port(pid: int, body: PortIn, me: Principal = Depends(require_master_w
 
 
 @router.delete("/ports/{pid}")
-def delete_port(pid: int, me: Principal = Depends(require_master_write)):
+def delete_port(pid: int, me: Principal = Depends(require_writer)):
     p = db.row("SELECT * FROM ports WHERE id = ?", (pid,))
     if not p:
         raise HTTPException(404, "Port nicht gefunden")
+    access.require_write(me, access.site_of_device(p["device_id"]))
     db.execute("DELETE FROM ports WHERE id = ?", (pid,))
     audit.log(me.name, "port.delete", "port", pid, p["name"])
     return {"ok": True}
 
 
 @router.put("/ports/{pid}/peer")
-def set_peer(pid: int, body: PeerIn, me: Principal = Depends(require_master_write)):
+def set_peer(pid: int, body: PeerIn, me: Principal = Depends(require_writer)):
     """Durchschleifung (z. B. Vorder-/Rückseite eines Patchfelds): symmetrisch, nur innerhalb desselben Geräts."""
     p = db.row("SELECT * FROM ports WHERE id = ?", (pid,))
     if not p:
         raise HTTPException(404, "Port nicht gefunden")
+    access.require_write(me, access.site_of_device(p["device_id"]))
     if p["peer_port_id"]:                                                   # bisherige Verknüpfung lösen
         db.execute("UPDATE ports SET peer_port_id = NULL WHERE id IN (?, ?)", (pid, p["peer_port_id"]))
     if body.peer_port_id:
@@ -441,10 +564,14 @@ def list_cables(
     cable_type: Optional[str] = None,
     measurement_ok: Optional[str] = None,
     q: Optional[str] = None,
-    _: Principal = Depends(current_principal),
+    me: Principal = Depends(current_principal),
 ):
-    """Alle Kabel, optional gefiltert nach Typ, Messstatus oder Kabelnummer."""
+    """Alle Kabel (für Bereichs-Benutzer: Kabel, von denen mindestens ein Ende im eigenen Standort liegt), optional gefiltert."""
     where, args = [], []
+    ca, aa = access.device_clause(me, "da")
+    cb, ab = access.device_clause(me, "db_")
+    if ca:
+        where.append(f"({ca} OR {cb})"); args += aa + ab
     if cable_type:
         where.append("c.cable_type = ?"); args.append(cable_type)
     if measurement_ok == "yes":
@@ -496,12 +623,14 @@ def _cable_out(c: dict) -> dict:
 
 
 @router.put("/cables/{cid}")
-def update_cable(cid: int, body: CableIn, me: Principal = Depends(require_master_write)):
+def update_cable(cid: int, body: CableIn, me: Principal = Depends(require_writer)):
     """Kabelattribute aktualisieren (ohne die Port-Verbindung zu ändern)."""
     c = db.row("SELECT * FROM cables WHERE id = ?", (cid,))
     if not c:
         raise HTTPException(404, "Kabel nicht gefunden")
-    _one_of(body.cable_type, CABLE_TYPES, "Kabeltyp")
+    if not (access.can_write_site(me, access.site_of_port(c["port_a_id"])) or access.can_write_site(me, access.site_of_port(c["port_b_id"]))):
+        raise HTTPException(403, "Keine Berechtigung für diesen Standort")           # eines der beiden Enden genügt
+    body.cable_type = check_cable_type(body.cable_type)
     db.execute(
         """UPDATE cables SET cable_label=?, cable_type=?, fiber_count=?, length_m=?, color=?,
                              installed_at=?, measurement_ref=?, measurement_ok=?, note=? WHERE id=?""",
@@ -523,12 +652,15 @@ def update_cable(cid: int, body: CableIn, me: Principal = Depends(require_master
 
 
 @router.put("/ports/{pid}/cable")
-def set_cable(pid: int, body: CableIn, me: Principal = Depends(require_master_write)):
+def set_cable(pid: int, body: CableIn, me: Principal = Depends(require_writer)):
     """Verbindet zwei Ports mit einem Kabel (symmetrisch). port_b_id=None löst die Verbindung."""
     p = db.row("SELECT * FROM ports WHERE id = ?", (pid,))
     if not p:
         raise HTTPException(404, "Port nicht gefunden")
-    _one_of(body.cable_type, CABLE_TYPES, "Kabeltyp")
+    access.require_write(me, access.site_of_device(p["device_id"]))
+    if body.port_b_id:
+        access.require_write(me, access.site_of_port(body.port_b_id))              # beide Enden müssen im eigenen Bereich liegen
+    body.cable_type = check_cable_type(body.cable_type)
     db.execute("DELETE FROM cables WHERE port_a_id = ? OR port_b_id = ?", (pid, pid))
     if body.port_b_id:
         q = db.row("SELECT * FROM ports WHERE id = ?", (body.port_b_id,))

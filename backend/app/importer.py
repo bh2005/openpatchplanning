@@ -186,6 +186,7 @@ def normalize_device(rec: dict) -> dict:
             "model": str(rec.get("model") or "").strip(), "serial": str(rec.get("serial") or "").strip(),
             "mgmt_ip": str(rec.get("mgmt_ip") or "").strip(), "status": status, "note": str(rec.get("note") or "").strip(),
             "ext_id": str(rec.get("ext_id") or "").strip(), "location": str(loc).strip(), "ports": ports,
+            "site_name": str(rec.get("site_name") or "").strip(), "site_hint": bool(rec.get("site_hint")),
             "ports_only": bool(rec.get("_ports_only"))}
 
 
@@ -195,7 +196,7 @@ class _Rollback(Exception):
     pass
 
 
-def _resolve_location(c: sqlite3.Connection, spec: str, create: bool) -> Optional[int]:
+def _resolve_location(c: sqlite3.Connection, spec: str, create: bool, site_name: str = "") -> Optional[int]:
     """„SITE/Gebäude/Raum/Rack“ -> location_id; legt fehlende Teile an, wenn create gesetzt ist."""
     parts = [p.strip() for p in re.split(r"[/>]", spec) if p.strip()]
     if not parts:
@@ -204,9 +205,11 @@ def _resolve_location(c: sqlite3.Connection, spec: str, create: bool) -> Optiona
     if not site:
         if not create:
             raise ValueError(f"Standort '{parts[0]}' existiert nicht")
-        sid = c.execute("INSERT INTO sites(code, name) VALUES (?,?)", (parts[0], parts[0])).lastrowid
+        sid = c.execute("INSERT INTO sites(code, name) VALUES (?,?)", (parts[0], site_name or parts[0])).lastrowid
     else:
         sid = site["id"]
+        if site_name and site["name"] == site["code"]:                      # Platzhalter-Name (früher nur der Code) durch den echten ersetzen
+            c.execute("UPDATE sites SET name = ? WHERE id = ?", (site_name, sid))
     if len(parts) == 1:                          # nur der Standort: Geräte hängen an einer Location -> Standard-Location „Allgemein“
         parts.append(DEFAULT_LOCATION)
     parent: Optional[int] = None
@@ -234,7 +237,12 @@ def _apply_one(c: sqlite3.Connection, rec: dict, source: str, create_locations: 
     if not existing:
         existing = c.execute("SELECT * FROM devices WHERE hostname = ?", (rec["hostname"],)).fetchone()
 
-    loc_id = _resolve_location(c, rec["location"], create_locations) if rec["location"] else None
+    loc_id = _resolve_location(c, rec["location"], create_locations, rec["site_name"]) if rec["location"] else None
+    if loc_id and rec["site_hint"] and existing and existing["location_id"]:
+        # Standort-Hinweis (z. B. Checkmk-Tag): eine genauere Platzierung (Raum/Rack) am selben Standort bleibt erhalten
+        same = c.execute("SELECT 1 FROM locations a JOIN locations b ON b.site_id = a.site_id WHERE a.id = ? AND b.id = ?", (existing["location_id"], loc_id)).fetchone()
+        if same:
+            loc_id = None
     changes: list[str] = []
 
     if not existing:

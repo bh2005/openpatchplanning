@@ -1,16 +1,16 @@
 # Import aus Checkmk
 
-OpenPatchPlanning liest Geräte und Ports aus dem **Checkmk-HW/SW-Inventar**. Das Inventar enthält für Netzwerkgeräte
+Portwerk liest Geräte und Ports aus dem **Checkmk-HW/SW-Inventar**. Das Inventar enthält für Netzwerkgeräte
 (Checkmk-Knoten `networking.interfaces`) Interfaces mit Name, Beschreibung, Geschwindigkeit und Status, dazu Hersteller,
 Modell und Seriennummer (`hardware.components.chassis`), die Management-IP und die **LLDP-Nachbarn**
 (`networking.lldp_cache.neighbors`, wird für den Soll/Ist-Abgleich in Etappe 3 verwendet).
 
 Der Import läuft über ein kleines Skript auf dem Checkmk-Server ([tools/checkmk_export.py](../tools/checkmk_export.py), nur Python 3,
-keine Abhängigkeiten). So braucht OpenPatchPlanning keinen Zugriff auf Checkmk-Interna; die Umwandlung geschieht im Server und ist getestet.
+keine Abhängigkeiten). So braucht Portwerk keinen Zugriff auf Checkmk-Interna; die Umwandlung geschieht im Server und ist getestet.
 
 ## Einrichten
 
-1. In OpenPatchPlanning (als Administrator): Verwaltung → **API-Zugänge** → neuen Zugang mit Umfang **write** anlegen. Das Token `opp_…`
+1. In Portwerk (als Administrator): Verwaltung → **API-Zugänge** → neuen Zugang mit Umfang **write** anlegen. Das Token `opp_…`
    wird nur einmal angezeigt.
 2. Das Skript auf den Checkmk-Server kopieren (als Site-Benutzer oder root ausführbar).
 
@@ -62,3 +62,32 @@ Das Skript ruft `POST /api/import/checkmk` auf; das lässt sich auch ohne Skript
 ```
 
 Swagger-Dokumentation: `/api/docs`.
+
+## Soll/Ist-Abgleich (LLDP/CDP)
+
+Der Import übernimmt zusätzlich die Nachbarn aus `networking.lldp_cache.neighbors` und `networking.cdp_cache.neighbors`. Jeder Import ersetzt die Nachbarn
+der enthaltenen Geräte; ein Host ohne Nachbartabellen lässt den bisherigen Stand unverändert. Das Menü **Soll/Ist** vergleicht sie mit der dokumentierten
+Verkabelung – über Patchfelder und Dosen hinweg bis zum ersten aktiven Gerät:
+
+| Ergebnis | Bedeutung |
+|---|---|
+| stimmt | Gegenstelle und Port entsprechen der Dokumentation (eine Strecke erscheint nur einmal) |
+| anderer Port / anderes Gerät | der gemeldete Nachbar weicht von der Dokumentation ab |
+| nicht gesehen | dokumentiert, aber kein Nachbar gemeldet (Gegenstelle spricht LLDP/CDP) |
+| nicht dokumentiert | Nachbar gesehen, aber kein Kabel erfasst |
+| keine Daten / Port unbekannt | Gegenstelle ohne LLDP/CDP bzw. gemeldeter Port fehlt im Bestand |
+
+Portnamen werden normalisiert (`GigabitEthernet0/3` = `Gi0/3`); Nachbarn werden über den Kurznamen (ohne Domäne) oder die Management-IP dem Gerät zugeordnet.
+Reine MAC-Adressen werden ignoriert. API: `GET /api/compare` (Filter `site_id`, `status`), `GET /api/compare/export.csv`.
+
+## Link zu Checkmk
+
+Unter *Verwaltung → Checkmk* die Adresse der Site eintragen (z. B. `https://monitoring.example.test/prod`). Danach zeigen Rack-Ansicht und Gerätedetails den Link
+„In Checkmk öffnen“ zur Host-Seite (Hostname = Hostname in Checkmk).
+
+## Standort aus dem Host-Tag
+
+Mit `--location-tag <Tag-Gruppe>` (z. B. `location`) liest das Export-Tool den Tag je Host per Livestatus: die **Tag-ID wird zum Standort-Code**, der Tag-Titel
+(ohne führenden Code) zum Standortnamen. Neue Standorte werden angelegt; Geräte ohne Ort landen in der Location „Allgemein“. Eine genauere Platzierung
+(Raum/Rack) am selben Standort bleibt bei erneutem Import erhalten, bei einem anderen Standort im Tag wird das Gerät dorthin verschoben. Hosts ohne Tag-Wert
+(leer oder nur Striche) bleiben unverändert; ein ausdrücklich gesetztes `--site-code` hat Vorrang.

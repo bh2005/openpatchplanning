@@ -2,7 +2,10 @@
   <div class="max-w-6xl space-y-4">
     <div class="flex items-center justify-between">
       <h1 class="text-lg font-semibold text-slate-800 dark:text-slate-100">Standorte</h1>
-      <button v-if="canWrite" @click="openSite()" :class="btnPrimary">+ Standort</button>
+      <div v-if="canWrite" class="flex gap-2">
+        <button @click="wizard = { siteId: null }" :class="btnPrimary">Assistent: Neuer Standort</button>
+        <button @click="openSite()" :class="btnGhost">+ Standort (einfach)</button>
+      </div>
     </div>
     <p v-if="error" class="text-sm text-red-500">{{ error }}</p>
 
@@ -27,6 +30,7 @@
           <div v-if="canWrite" class="flex gap-3 items-center">
             <button :class="btnLink" @click="openSite(sel)">Bearbeiten</button>
             <button :class="btnDanger" @click="removeSite">Löschen</button>
+            <button :class="btnGhost" @click="wizard = { siteId: sel.id, siteLabel: sel.code }">Struktur-Assistent</button>
             <button :class="btnPrimary" @click="openLoc()">+ Location</button>
           </div>
         </div>
@@ -36,17 +40,21 @@
           <li v-for="n in tree" :key="n.id" class="flex items-center gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50" :style="{ paddingLeft: n.depth * 18 + 'px' }">
             <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300">{{ kindLabel(n.kind) }}</span>
             <span class="text-slate-800 dark:text-slate-100">{{ n.name }}</span>
+            <span v-if="n.ident" class="text-xs font-mono text-slate-500">{{ n.ident }}</span>
             <span v-if="n.rack_units" class="text-xs text-slate-400">{{ n.rack_units }} HE</span>
             <router-link v-if="n.devices" :to="{ path: '/devices', query: { location_id: n.id } }" class="text-xs text-ks-600 dark:text-ks-400 hover:underline">{{ n.devices }} Geräte</router-link>
             <span v-if="canWrite" class="ml-auto flex gap-3">
               <button :class="btnLink" @click="openLoc(n)">Bearbeiten</button>
-              <button :class="btnLink" @click="openLoc(null, n)">+ darunter</button>
+              <button v-if="MOVABLE_KINDS.includes(n.kind)" :class="btnLink" :title="n.kind === 'vehicle' ? 'Mobile Maschine an einen anderen Standort verlegen (samt Geräten)' : 'An einen anderen Standort/Ort verlegen (samt Geräten)'" @click="openMove(n)">Verlegen</button>
+              <button v-if="!CONTAINER_KINDS.includes(n.kind)" :class="btnLink" @click="openLoc(null, n)">+ darunter</button>
               <button :class="btnDanger" @click="removeLoc(n)">Löschen</button>
             </span>
           </li>
         </ul>
       </div>
     </div>
+
+    <SiteWizard v-if="wizard" :site-id="wizard.siteId" :site-label="wizard.siteLabel || ''" @close="wizard = null" @done="wizardDone" />
 
     <ModalDialog v-if="siteForm" :title="siteForm.id ? 'Standort bearbeiten' : 'Neuer Standort'" :error="formError" @close="siteForm = null">
       <div><label :class="lbl">Code</label><input v-model="siteForm.code" :class="inp" placeholder="z. B. SITE-A" /></div>
@@ -59,6 +67,19 @@
       </template>
     </ModalDialog>
 
+    <ModalDialog v-if="moveForm" :title="`${kindLabel(moveForm.node.kind)} „${moveForm.node.name}“ verlegen`" :error="formError" @close="moveForm = null">
+      <p class="text-sm text-slate-500">Die Location wird samt Gehäusen und Geräten darunter an den neuen Ort gestellt (z. B. eine mobile Maschine in ein anderes Werk). Die Änderung steht im Audit-Log.</p>
+      <div><label :class="lbl">Standort</label>
+        <select v-model="moveForm.site_id" :class="inp" @change="loadMoveTargets"><option v-for="s in sites" :key="s.id" :value="s.id">{{ s.code }} · {{ s.name }}</option></select></div>
+      <div><label :class="lbl">Darunter (optional)</label>
+        <select v-model="moveForm.parent_id" :class="inp"><option :value="null">(direkt am Standort)</option>
+          <option v-for="n in moveForm.targets" :key="n.id" :value="n.id">{{ n.path }}</option></select></div>
+      <template #footer>
+        <button @click="moveForm = null" :class="btnGhost">Abbrechen</button>
+        <button @click="saveMove" :class="btnPrimary">Verlegen</button>
+      </template>
+    </ModalDialog>
+
     <ModalDialog v-if="locForm" :title="locForm.id ? 'Location bearbeiten' : 'Neue Location'" :error="formError" @close="locForm = null">
       <div><label :class="lbl">Art</label>
         <select v-model="locForm.kind" :class="inp"><option v-for="[k, l] in LOCATION_KINDS" :key="k" :value="k">{{ l }}</option></select></div>
@@ -66,7 +87,8 @@
       <div><label :class="lbl">Übergeordnet</label>
         <select v-model="locForm.parent_id" :class="inp"><option :value="null">(oberste Ebene)</option>
           <option v-for="n in parentChoices" :key="n.id" :value="n.id">{{ '– '.repeat(n.depth) }}{{ n.name }}</option></select></div>
-      <div v-if="locForm.kind === 'rack'"><label :class="lbl">Höheneinheiten (HE)</label><input v-model.number="locForm.rack_units" type="number" min="1" max="100" :class="inp" /></div>
+      <div v-if="CONTAINER_KINDS.includes(locForm.kind)"><label :class="lbl">Höheneinheiten (HE){{ locForm.kind === 'cabinet' ? ' – optional' : '' }}</label><input v-model.number="locForm.rack_units" type="number" min="1" max="100" :class="inp" :placeholder="locForm.kind === 'cabinet' ? 'leer = keine HE-Teilung (Hutschiene/Montageplatte)' : ''" /></div>
+      <div v-if="['machine', 'vehicle', 'cabinet', 'wallrack', 'rack'].includes(locForm.kind)"><label :class="lbl">{{ locForm.kind === 'vehicle' ? 'Kennzeichen / Fahrzeugnummer' : locForm.kind === 'machine' ? 'Anlagen-/Maschinennummer' : 'Bezeichnung / Nummer' }}</label><input v-model="locForm.ident" :class="inp" /></div>
       <div><label :class="lbl">Notiz</label><input v-model="locForm.note" :class="inp" /></div>
       <template #footer>
         <button @click="locForm = null" :class="btnGhost">Abbrechen</button>
@@ -78,14 +100,36 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import ModalDialog from '../components/ModalDialog.vue'
-import { api, errText, isAdmin } from '../api.js'
-import { inp, lbl, card, btnPrimary, btnGhost, btnDanger, btnLink, LOCATION_KINDS, kindLabel } from '../ui.js'
+import SiteWizard from '../components/SiteWizard.vue'
+import { api, errText, canWriteMaster } from '../api.js'
+import { inp, lbl, card, btnPrimary, btnGhost, btnDanger, btnLink, LOCATION_KINDS, CONTAINER_KINDS, MOVABLE_KINDS, kindLabel } from '../ui.js'
 
-const canWrite = isAdmin()
+const canWrite = canWriteMaster()
 const sites = ref([]), sel = ref(null), locations = ref([])
 const error = ref(''), formError = ref('')
-const siteForm = ref(null), locForm = ref(null)
+const siteForm = ref(null), locForm = ref(null), wizard = ref(null), moveForm = ref(null)
+async function openMove(n) {
+  formError.value = ''
+  moveForm.value = { node: n, site_id: sel.value.id, parent_id: null, targets: [] }
+  await loadMoveTargets()
+}
+async function loadMoveTargets() {
+  const f = moveForm.value
+  f.parent_id = null
+  try { f.targets = (await api.locations(f.site_id)).filter(l => !CONTAINER_KINDS.includes(l.kind) && l.id !== f.node.id && !(l.path || '').startsWith(f.node.path + ' / ')) } catch { f.targets = [] }
+}
+async function saveMove() {
+  try {
+    const f = moveForm.value
+    const r = await api.moveLocation(f.node.id, { site_id: f.site_id, parent_id: f.parent_id })
+    moveForm.value = null
+    await load(f.site_id === sel.value.id ? sel.value.id : f.site_id)
+    error.value = ''
+  } catch (e) { formError.value = errText(e) }
+}
+async function wizardDone(siteId) { wizard.value = null; await load(siteId) }
 
 // Locations als Baum mit Einrückungstiefe (Eltern vor Kindern)
 const tree = computed(() => {
@@ -95,7 +139,7 @@ const tree = computed(() => {
   walk(null, 0)
   return out
 })
-const parentChoices = computed(() => tree.value.filter(n => n.id !== locForm.value?.id && n.kind !== 'rack'))
+const parentChoices = computed(() => tree.value.filter(n => n.id !== locForm.value?.id && !CONTAINER_KINDS.includes(n.kind)))
 
 async function load(keepId) {
   try {
@@ -122,12 +166,12 @@ async function removeSite() {
 
 function openLoc(edit, parent) {
   formError.value = ''
-  locForm.value = edit ? { ...edit } : { site_id: sel.value.id, parent_id: parent?.id ?? null, kind: parent ? (parent.kind === 'building' ? 'floor' : parent.kind === 'floor' ? 'room' : 'rack') : 'building', name: '', rack_units: null, note: '' }
+  locForm.value = edit ? { ...edit } : { site_id: sel.value.id, parent_id: parent?.id ?? null, kind: parent ? ({ building: 'floor', floor: 'room', room: 'machine', machine: 'cabinet', vehicle: 'cabinet' }[parent.kind] || 'room') : 'building', name: '', rack_units: null, note: '', ident: '' }
 }
 async function saveLoc() {
   try {
     const f = { ...locForm.value }
-    if (f.kind !== 'rack') f.rack_units = null
+    if (!CONTAINER_KINDS.includes(f.kind)) f.rack_units = null
     f.id ? await api.updateLocation(f.id, f) : await api.createLocation(f)
     locForm.value = null; await load(sel.value.id)
   } catch (e) { formError.value = errText(e) }
@@ -137,5 +181,6 @@ async function removeLoc(n) {
   try { await api.deleteLocation(n.id); await load(sel.value.id) } catch (e) { error.value = errText(e) }
 }
 
-onMounted(() => load())
+const route = useRoute()
+onMounted(() => load(Number(route.query.site) || undefined))
 </script>

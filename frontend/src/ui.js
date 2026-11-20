@@ -12,12 +12,29 @@ export const td = 'px-3 py-2'
 
 export const DEVICE_TYPES = [
   ['switch', 'Switch'], ['router', 'Router'], ['firewall', 'Firewall'], ['ap', 'Access Point'], ['server', 'Server'],
-  ['patchpanel', 'Patchfeld'], ['outlet', 'Dose'], ['endpoint', 'Endgerät'], ['other', 'Sonstiges'],
+  ['patchpanel', 'Patchfeld'], ['outlet', 'Dose'], ['endpoint', 'Endgerät'], ['pdu', 'Steckdosenleiste (PDU)'], ['ups', 'USV'],
+  ['timeserver', 'Zeitserver / Funkuhr'], ['media_converter', 'Medienkonverter'],
+  ['cable_mgmt', 'Kabelführung'], ['blank_panel', 'Blindblende'], ['shelf', 'Fachboden'],
+  ['plc', 'SPS / Steuerung'], ['hmi', 'Bedienpanel (HMI)'], ['io_module', 'I/O-Modul'], ['drive', 'Antrieb / Umrichter'], ['gateway', 'Gateway / Modem'],
+  ['power_supply', 'Netzteil'], ['other', 'Sonstiges'],
 ]
+export const PASSIVE_TYPES = ['cable_mgmt', 'blank_panel', 'shelf']      // Platzhalter ohne Ports: belegen nur Rackplatz
+export const MOUNT_SIDES = [['front', 'Vorderseite'], ['rear', 'Rückseite'], ['both', 'beide Seiten (durchgehend)']]
+export const SIDE_SLOTS = [['left', 'links'], ['right', 'rechts']]
+export const mountLabel = k => (MOUNT_SIDES.find(x => x[0] === k) || [k, k])[1]
 export const DEVICE_STATUS = [['planned', 'geplant'], ['active', 'aktiv'], ['retired', 'außer Betrieb']]
-export const LOCATION_KINDS = [['building', 'Gebäude'], ['floor', 'Etage'], ['room', 'Raum'], ['rack', 'Rack']]
-export const PORT_MEDIA = ['RJ45', 'SFP', 'SFP+', 'SFP28', 'QSFP', 'LWL', 'other']
-export const CABLE_TYPES = ['Cat5e', 'Cat6', 'Cat6A', 'Cat7', 'Cat7A', 'LWL-SM-OS2', 'LWL-MM-OM3', 'LWL-MM-OM4', 'LWL-MM-OM5', 'DAC', 'AOC', 'other']
+export const LOCATION_KINDS = [['building', 'Gebäude'], ['floor', 'Etage'], ['room', 'Raum'], ['machine', 'Anlage/Maschine'], ['vehicle', 'Mobile Maschine'],
+  ['rack', 'Rack'], ['wallrack', 'Wandgehäuse'], ['cabinet', 'Schaltschrank']]
+export const CONTAINER_KINDS = ['rack', 'wallrack', 'cabinet']                 // nehmen Geräte auf, können eine HE-Teilung haben
+export const PLACE_KINDS = ['room', 'machine', 'vehicle', 'rack', 'wallrack', 'cabinet']   // Orte, an denen Geräte stehen können
+export const MOVABLE_KINDS = ['vehicle', 'machine', 'cabinet', 'wallrack', 'rack']        // lassen sich an einen anderen Standort verlegen
+export const PORT_MEDIA = ['RJ45', 'SFP', 'SFP+', 'SFP28', 'QSFP', 'LWL', 'BNC', 'RJ11', 'RS232', 'RS485', 'C13', 'C14', 'Schuko', 'other']
+export const CABLE_CATEGORIES = [['copper', 'Kupfer (Daten)'], ['fiber', 'Glasfaser'], ['power', 'Strom'], ['coax', 'Koax'], ['serial', 'Seriell / Signal'], ['telco', 'Telefon'], ['other', 'Sonstiges']]
+// Welche Port-Medien zu welcher Kabelkategorie passen (spiegelt den Server; „other“ passt immer, Abweichungen sind nur ein Hinweis)
+export const CATEGORY_MEDIA = {
+  copper: ['RJ45', 'SFP', 'SFP+', 'SFP28', 'QSFP'], fiber: ['LWL', 'SFP', 'SFP+', 'SFP28', 'QSFP'], power: ['C13', 'C14', 'Schuko'],
+  coax: ['BNC'], serial: ['RS232', 'RS485', 'RJ45', 'RJ11'], telco: ['RJ11', 'RJ45'],
+}
 export const SOURCES = [['manual', 'manuell'], ['csv', 'CSV'], ['json', 'JSON'], ['api', 'API'], ['checkmk', 'Checkmk'], ['openplan', 'OpenPlan']]
 export const ROLES = [
   ['admin', 'Administrator', 'darf alles'], ['planer', 'Planer', 'erstellt und reicht Patchaufträge ein'],

@@ -9,6 +9,12 @@
     </div>
     <p v-if="error" class="text-sm text-red-500">{{ error }}</p>
 
+    <AdminLdap v-if="tab === 'ldap'" />
+    <AdminTls v-if="tab === 'tls'" />
+    <AdminMail v-if="tab === 'mail'" />
+    <AdminCheckmk v-if="tab === 'checkmk'" />
+    <AdminOpenPlan v-if="tab === 'openplan'" />
+
     <!-- Benutzer -->
     <div v-if="tab === 'users'" class="space-y-3">
       <div class="text-right"><button :class="btnPrimary" @click="openUser()">+ Benutzer</button></div>
@@ -17,15 +23,17 @@
           <thead><tr class="bg-slate-50 dark:bg-slate-700/40"><th :class="th">Benutzer</th><th :class="th">Rollen</th><th :class="th">Letzte Anmeldung</th><th :class="th">Status</th><th :class="th"></th></tr></thead>
           <tbody>
             <tr v-for="u in users" :key="u.id" class="border-t border-slate-100 dark:border-slate-700">
-              <td :class="td"><div class="font-medium text-slate-800 dark:text-slate-100">{{ u.username }}</div><div class="text-xs text-slate-400">{{ u.full_name }} {{ u.email }}</div></td>
-              <td :class="td">{{ u.roles.map(roleLabel).join(', ') }}</td>
+              <td :class="td"><div class="font-medium text-slate-800 dark:text-slate-100">{{ u.username }} <span v-if="u.source === 'ldap'" class="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-ks-50 dark:bg-ks-900/30 text-ks-700 dark:text-ks-300 font-normal" title="Anmeldung über Active Directory; Rollen kommen aus den AD-Gruppen">AD</span></div><div class="text-xs text-slate-400">{{ u.full_name }} {{ u.email }}</div></td>
+              <td :class="td"><div v-if="u.roles.length">{{ u.roles.map(roleLabel).join(', ') }} <span class="text-[10px] text-slate-400">(global)</span></div>
+                <div class="flex flex-wrap gap-1 mt-0.5"><span v-for="s in u.scopes" :key="s.id" class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300" :title="s.source === 'ldap' ? 'aus AD-Gruppe' : 'manuell vergeben'">{{ scopeText(s) }}<span v-if="s.source === 'ldap'"> · AD</span></span></div>
+                <div v-if="!u.roles.length && !u.scopes.length" class="text-xs text-slate-400">–</div></td>
               <td :class="td" class="text-slate-500">{{ fmtTime(u.last_login) }}</td>
               <td :class="td">{{ u.active ? 'aktiv' : 'gesperrt' }}</td>
               <td :class="td" class="text-right whitespace-nowrap">
                 <button :class="btnLink" @click="openUser(u)">Bearbeiten</button>
-                <button :class="btnLink" class="ml-3" @click="openReset(u)">Passwort</button>
-                <button :class="btnLink" class="ml-3" @click="revoke(u)">Sitzungen beenden</button>
-                <button :class="btnDanger" class="ml-3" @click="removeUser(u)">Löschen</button>
+                <button v-if="u.source !== 'ldap' && !u.limited" :class="btnLink" class="ml-3" @click="openReset(u)">Passwort</button>
+                <button v-if="!u.limited" :class="btnLink" class="ml-3" @click="revoke(u)">Sitzungen beenden</button>
+                <button v-if="!u.limited" :class="btnDanger" class="ml-3" @click="removeUser(u)">Löschen</button>
               </td>
             </tr>
           </tbody>
@@ -78,13 +86,26 @@
         <div><label :class="lbl">Name</label><input v-model="userForm.full_name" :class="inp" /></div>
         <div><label :class="lbl">E-Mail</label><input v-model="userForm.email" :class="inp" /></div>
       </div>
-      <div><label :class="lbl">Rollen</label>
+      <div v-if="globalAdmin"><label :class="lbl">Globale Rollen <span class="normal-case text-slate-300">– gelten für alle Standorte, Benutzer sehen alles</span></label>
         <label v-for="[k, l, desc] in ROLES" :key="k" class="flex items-center gap-2 text-sm py-0.5 text-slate-700 dark:text-slate-200">
           <input type="checkbox" :value="k" v-model="userForm.roles" class="rounded text-ks-600" /> {{ l }} <span class="text-xs text-slate-400">– {{ desc }}</span></label></div>
-      <label v-if="userForm.id" class="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200"><input type="checkbox" v-model="userForm.active" class="rounded text-ks-600" /> Konto aktiv</label>
+      <div>
+        <div class="flex items-center justify-between"><label :class="lbl" class="!mb-0">Rechte pro Standort <span class="normal-case text-slate-300">– Benutzer ohne globale Rolle sehen nur diese Standorte</span></label>
+          <button type="button" :class="btnLink" @click="addScope">+ Standort-Recht</button></div>
+        <p v-if="!userForm.scopes.length && !userForm.ldapScopes.length" class="text-xs text-slate-400 mt-1">Keine Standort-Rechte.</p>
+        <div v-for="(sc, i) in userForm.scopes" :key="i" class="flex gap-2 mt-1.5">
+          <select v-model="sc.role" :class="inp" class="!w-44"><option v-for="[k, l] in ROLES" :key="k" :value="k">{{ l }}</option></select>
+          <select v-model="sc.site_id" :class="inp"><option :value="null" disabled>Standort wählen …</option><option v-for="s in siteChoices()" :key="s.id" :value="s.id">{{ s.code }} · {{ s.name }}</option></select>
+          <button type="button" :class="btnDanger" @click="userForm.scopes.splice(i, 1)">✕</button>
+        </div>
+        <p v-if="userForm.ldapScopes.length" class="text-xs text-slate-400 mt-2">Aus AD-Gruppen (nicht änderbar): {{ userForm.ldapScopes.map(scopeText).join(', ') }}</p>
+        <p v-if="!globalAdmin" class="text-xs text-slate-400 mt-1">Du kannst Rechte nur für Standorte vergeben, für die du Administrator bist.</p>
+      </div>
+      <label v-if="userForm.id && !userForm.limited" class="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-200"><input type="checkbox" v-model="userForm.active" class="rounded text-ks-600" /> Konto aktiv</label>
+      <p v-if="userForm.id && userForm.limited" class="text-xs text-slate-400">Dieser Benutzer gehört auch zu anderen Bereichen: Du siehst und änderst nur die Rechte deiner Standorte.</p>
       <template #footer>
         <button @click="userForm = null" :class="btnGhost">Abbrechen</button>
-        <button @click="saveUser" :class="btnPrimary" :disabled="!userForm.roles.length || (!userForm.id && (!userForm.username || !userForm.password))">Speichern</button>
+        <button @click="saveUser" :class="btnPrimary" :disabled="!canSave">Speichern</button>
       </template>
     </ModalDialog>
 
@@ -112,13 +133,22 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import ModalDialog from '../components/ModalDialog.vue'
+import AdminLdap from '../components/AdminLdap.vue'
+import AdminTls from '../components/AdminTls.vue'
+import AdminMail from '../components/AdminMail.vue'
+import AdminCheckmk from '../components/AdminCheckmk.vue'
+import AdminOpenPlan from '../components/AdminOpenPlan.vue'
 import { helpContext } from '../content/helpContext.js'
-import { api, errText } from '../api.js'
+import { api, errText, isAdmin, siteAdminIds } from '../api.js'
 import { inp, lbl, card, th, td, btnPrimary, btnGhost, btnDanger, btnLink, ROLES, roleLabel, fmtTime } from '../ui.js'
 
-const tabs = [['users', 'Benutzer'], ['tokens', 'API-Zugänge'], ['audit', 'Audit-Log']]
+const globalAdmin = isAdmin()
+const tabs = globalAdmin ? [['users', 'Benutzer'], ['tokens', 'API-Zugänge'], ['ldap', 'AD / LDAP'], ['tls', 'Zertifikat (ACME)'], ['mail', 'E-Mail'], ['checkmk', 'Checkmk'], ['openplan', 'OpenPlan'], ['audit', 'Audit-Log']] : [['users', 'Benutzer']]
+const sites = ref([])
+const siteChoices = () => globalAdmin ? sites.value : sites.value.filter(s => siteAdminIds().includes(s.id))
+const scopeText = s => `${roleLabel(s.role)} @ ${s.site_code}`
 const tab = ref('users')
 const users = ref([]), tokens = ref([]), audit = ref([])
 const error = ref(''), formError = ref('')
@@ -127,21 +157,33 @@ const userForm = ref(null), resetForm = ref(null), tokenForm = ref(null), newTok
 async function load() {
   error.value = ''
   try {
-    if (tab.value === 'users') users.value = await api.users()
+    if (tab.value === 'users') { users.value = await api.users(); sites.value = await api.sites() }
     else if (tab.value === 'tokens') tokens.value = await api.tokens()
-    else audit.value = await api.audit({ limit: 200 })
+    else if (tab.value === 'audit') audit.value = await api.audit({ limit: 200 })
   } catch (e) { error.value = errText(e) }
 }
 watch(tab, t => { helpContext.value = t; load() }, { immediate: true })
 
 function openUser(u) {
   formError.value = ''
-  userForm.value = u ? { ...u, roles: [...u.roles] } : { username: '', password: '', full_name: '', email: '', roles: ['viewer'] }
+  userForm.value = u
+    ? { ...u, roles: [...u.roles], scopes: u.scopes.filter(s => s.source === 'manual').map(s => ({ role: s.role, site_id: s.site_id })), ldapScopes: u.scopes.filter(s => s.source === 'ldap') }
+    : { username: '', password: '', full_name: '', email: '', roles: globalAdmin ? ['viewer'] : [], scopes: [], ldapScopes: [] }
 }
+function addScope() { userForm.value.scopes.push({ role: 'viewer', site_id: null }) }
+const canSave = computed(() => {
+  const f = userForm.value
+  if (!f) return false
+  const scopes = f.scopes.filter(s => s.site_id)
+  if (f.scopes.length !== scopes.length) return false                                   // unvollständige Zeile
+  if (!f.id && (!f.username || !f.password)) return false
+  return f.roles.length > 0 || scopes.length > 0 || f.ldapScopes.length > 0 || (f.id && f.source === 'ldap')
+})
 async function saveUser() {
   try {
     const f = userForm.value
-    f.id ? await api.updateUser(f.id, { roles: f.roles, active: f.active, full_name: f.full_name, email: f.email }) : await api.createUser(f)
+    const body = { roles: globalAdmin ? f.roles : undefined, scopes: f.scopes.filter(s => s.site_id), full_name: f.full_name, email: f.email }
+    f.id ? await api.updateUser(f.id, { ...body, active: f.limited ? undefined : f.active }) : await api.createUser({ ...body, roles: globalAdmin ? f.roles : [], username: f.username, password: f.password })
     userForm.value = null; await load()
   } catch (e) { formError.value = errText(e) }
 }

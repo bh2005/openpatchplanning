@@ -1,7 +1,7 @@
 // Handbuch: Abschnitte mit Überschrift und HTML-Inhalt (Seite /handbuch).
 export const sections = [
   { id: 'einstieg', title: 'Einstieg', html: `
-<p>OpenPatchPlanning verwaltet den Bestand für die Verkabelung: Standorte, Räume und Racks, Geräte mit Ports sowie Patchfelder und Dosen. Der Schwerpunkt liegt auf der <b>Planung</b>: Änderungen an der Verkabelung laufen später als Auftrag (planen → freigeben → ausführen → bestätigen).</p>
+<p>Portwerk verwaltet den Bestand für die Verkabelung: Standorte, Räume und Racks, Geräte mit Ports sowie Patchfelder und Dosen. Der Schwerpunkt liegt auf der <b>Planung</b>: Änderungen an der Verkabelung laufen später als Auftrag (planen → freigeben → ausführen → bestätigen).</p>
 <p>In dieser Ausbaustufe stehen die Stammdaten und der Import zur Verfügung.</p>
 <h3>Typischer Start</h3>
 <ol><li>Unter <b>Standorte</b> Standorte, Gebäude, Räume und Racks anlegen – oder beim Import anlegen lassen.</li>
@@ -49,6 +49,26 @@ export const sections = [
 <p>Tokens für Skripte (Präfix <code>opp_</code>). Umfang <i>read</i> oder <i>write</i>, optional mit Ablauf. Der Klartext wird nur einmal angezeigt; Übergabe im Header <code>Authorization: Bearer …</code> bzw. <code>X-Auth-Token</code>.</p>
 <h3>Audit-Log</h3>
 <p>Protokolliert Anmeldungen, Änderungen an Stammdaten, Importe sowie Benutzer- und Token-Verwaltung.</p>` },
+
+  { id: 'assistenten', title: 'Assistenten und Logikprüfung', html: `
+<p>Assistenten führen Schritt für Schritt durch häufige Aufgaben und zeigen vor dem Speichern eine Vorschau.</p>
+<ul><li><b>Neuer Standort</b> (Standorte): Standort, Struktur aus Gebäude → Etage → Raum → Rack, Prüfung. Alles wird in einem Schritt gespeichert.</li>
+<li><b>Gerät platzieren</b> (Geräte, Racks): Modell aus dem Katalog, Standort und HE-Position, Hostname und Daten, optional ein Kabel (z. B. Uplink), Umsetzung. Platzhalter (Kabelführung, Blindblende, Fachboden) laufen über denselben Assistenten, der Hostname ist dort optional.</li>
+<li><b>Massenverkabelung</b> (Geräte → „Assistent: Massenverkabelung“): viele Kabel auf einmal. <i>Patchfeld ↔ Patchfeld</i> verbindet alle Ports (z. B. Rückseite RZ ↔ Rückseite Etage 1); <i>Datendosen → Patchfeld/Switch</i> patcht alle Dosen einer Location der Reihe nach; <i>Aus Liste</i> liest eine Excel/CSV-Zuordnung (Gerät A; Port A; Gerät B; Port B; Kabelnummer). Die Zuordnung lässt sich vorab prüfen, versetzen und zeilenweise auslassen; Kabelnummern entstehen aus einem Muster. Ergebnis: <b>ein Patchauftrag mit Arbeitsliste</b> (oder alles sofort, atomar). Belegte Ports lösen eine einzige Rückfrage zum Rückbau aus.</li>
+<li><b>Schnellsuche:</b> <b>Strg+K</b> oder <b>/</b> (oder das Feld in der Seitenleiste) öffnet die Suche über Geräte (Hostname, IP, Seriennummer, Modell), Standorte, Orte, WAN-Verbindungen, Patchaufträge und Kabelnummern. Bei Geräten stehen Standort, Raum/Rack und Höheneinheit direkt im Treffer; Enter öffnet die Rack-Ansicht mit markiertem Gerät.</li>
+<li><b>OpenPlan-Anbindung:</b> Patchaufträge werden zu Aufgaben im OpenPlan-Projektplan (Verwaltung → OpenPlan). Status und Fortschritt gleichen sich automatisch ab; mehrere Aufträge lassen sich auf einmal übertragen oder in ein neues Projekt aus der Vorlage „Einbau Patchfelder / Verkabelung“ einhängen.</li>
+<li><b>Patchliste aus mehreren Aufträgen:</b> In „Patchaufträge“ Aufträge ankreuzen → „Patchliste aus Auswahl“: eine gemeinsame, nach Ort sortierte Arbeitsliste zum Abhaken, Exportieren und Drucken.</li>
+<li><b>Kabel einbauen</b> (Geräte, Geräteansicht, Racks → freier Port „verbinden …“): Kabelart aus dem Katalog (Daten, Glasfaser, <b>Strom</b>, <b>Koax RG58</b> für NTP/DCF, seriell, Telefon), Ende A und B, Details, Umsetzung. Passt das Port-Medium nicht zur Kabelart, gibt es einen Hinweis; belegte Ports lösen die Rückfrage zum Rückbau aus.</li>
+<li><b>Wandgehäuse, Schaltschränke, Maschinen und Lader:</b> Neben Racks gibt es Wandgehäuse und Schaltschränke (mit oder ohne HE), Anlagen/Maschinen und mobile Maschinen. Geräte darin werden auf <i>Hutschiene/Montageplatte</i> montiert (ohne HE-Raster, keine Kollision) oder – in Gehäusen mit HE – auf 19-Zoll-Plätzen. Typische Industrie-Typen (SPS, HMI, I/O-Modul, Antrieb, Gateway, Netzteil) und Vorlagen für die Hutschiene sind im Katalog.</li>
+<li><b>Einbaulage:</b> Jedes Gerät hat eine Einbauseite (vorne, hinten, durchgehend) und eine Ausrichtung: <i>19 Zoll</i> belegt HE, <i>hochkant</i> sitzt im Seitenkanal links oder rechts (PDU, senkrechte Kabelführung) und belegt keine HE. Die Kollisionsprüfung berücksichtigt Seite und Kanal.</li>
+<li><b>Patchfeld platzieren</b> (Geräte, Racks): Vorlage (Cat6A/LWL, 8/12/24 Ports, vorn und hinten verknüpft), Ort, Name und <b>Port-Zuordnung</b>: z. B. Vorderseite P1–P12 fortlaufend an Switch-Port 1–12, Kabelnummern aus einem Muster (<code>{hostname}-{nn}</code>). Mehrere Zuordnungen möglich, belegte Zielports lösen die Rückfrage zum Rückbau aus.</li>
+<li><b>Umsetzung wahlweise:</b> „sofort“ schreibt direkt in den Bestand (Administratoren), „per Patchauftrag“ legt das Gerät als <i>geplant</i> an und macht Einbau und Kabel zu Positionen eines Auftrags.</li></ul>
+<h3>Logikprüfung</h3>
+<ul><li><b>Port belegt:</b> Der Assistent fragt, ob der alte Patch zurückgebaut werden soll. Bei „Ja“ entsteht automatisch ein <b>Rückbau-Patchauftrag</b>; der neue Auftrag startet erst, wenn dieser bestätigt ist. Im Modus „sofort“ wird der alte Patch direkt entfernt.</li>
+<li><b>HE belegt:</b> Gleiche Rückfrage für das alte Gerät. Ausgebaute Geräte bleiben als „außer Betrieb“ in der Historie.</li>
+<li>Hostnamen müssen eindeutig sein; Gerät und Rackhöhe werden wie beim normalen Anlegen geprüft.</li></ul>
+<h3>Rechte pro Standort</h3>
+<p>Benutzer können Rollen nur für einzelne Standorte erhalten und sehen dann nur diese. Bereichs-Administratoren verwalten ihren Standort samt Benutzern. Siehe Verwaltung → Benutzer.</p>` },
 
   { id: 'ausblick', title: 'Ausblick', html: `
 <ul><li>Verbindungen und Patchaufträge mit Freigabe und Verlauf</li>

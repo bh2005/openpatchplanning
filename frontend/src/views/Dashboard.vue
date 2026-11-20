@@ -2,6 +2,16 @@
   <div class="max-w-5xl space-y-5">
     <h1 class="text-lg font-semibold text-slate-800 dark:text-slate-100">Übersicht</h1>
     <p v-if="error" class="text-sm text-red-500">{{ error }}</p>
+    <div v-if="tasks.length" :class="card" class="p-4">
+      <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-2">Meine Aufgaben ({{ tasks.length }})</h2>
+      <ul class="divide-y divide-slate-100 dark:divide-slate-700 text-sm">
+        <li v-for="w in tasks" :key="w.id" class="py-1.5 flex items-center gap-3">
+          <router-link :to="`/workorders/${w.id}`" class="font-mono font-medium text-ks-700 dark:text-ks-400 hover:underline">{{ w.number }}</router-link>
+          <span class="flex-1 truncate text-slate-700 dark:text-slate-200">{{ w.title }}</span>
+          <span class="text-xs text-slate-400 whitespace-nowrap">{{ w.status_label }} · {{ w.progress.done }}/{{ w.progress.total }}</span>
+        </li>
+      </ul>
+    </div>
     <template v-if="s">
       <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
         <StatCard label="Standorte" :value="s.sites" />
@@ -48,12 +58,15 @@ import StatCard from '../components/StatCard.vue'
 import { api, errText } from '../api.js'
 import { card, th, td, typeLabel, statusLabel, sourceLabel, fmtTime } from '../ui.js'
 
-const s = ref(null), error = ref('')
+const s = ref(null), error = ref(''), tasks = ref([])
 const sorted = o => Object.entries(o || {}).sort((a, b) => b[1] - a[1])
 const groups = computed(() => !s.value ? [] : [
   { title: 'Nach Typ', rows: sorted(s.value.devices_by_type), label: typeLabel },
   { title: 'Nach Status', rows: sorted(s.value.devices_by_status), label: statusLabel },
   { title: 'Nach Quelle', rows: sorted(s.value.devices_by_source), label: sourceLabel },
 ])
-onMounted(async () => { try { s.value = await api.stats() } catch (e) { error.value = errText(e) } })
+onMounted(async () => {
+  try { s.value = await api.stats() } catch (e) { error.value = errText(e) }
+  try { tasks.value = (await api.workorders({ assigned: 'me' })).filter(w => !['confirmed', 'rejected'].includes(w.status)) } catch { /* ohne Aufträge keine Karte */ }
+})
 </script>

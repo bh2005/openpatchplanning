@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Security
 
 from .. import audit, auth, db
-from ..auth import Principal, current_principal, require_admin, require_user, session_header
+from ..auth import Principal, current_principal, require_admin, require_user, require_user_admin, session_header
 from ..schemas import ChangePassword, LoginRequest, PasswordReset, TokenCreate, UserCreate, UserUpdate
 from ..security import hash_password, new_api_token, token_hash, verify_password
 
@@ -56,7 +56,7 @@ def change_password(body: ChangePassword, p: Principal = Depends(require_user)):
     return {"ok": True, "token": auth.new_session(u["id"])}       # alle anderen Sitzungen sind beendet, diese bleibt gültig
 
 
-# ── Benutzerverwaltung (Admin) ────────────────────────────────────────────────
+# ── Benutzerverwaltung (globale Administratoren und Bereichs-Administratoren) ─
 
 def _get_user(uid: int) -> dict:
     u = db.row("SELECT * FROM users WHERE id = ?", (uid,))
@@ -73,45 +73,127 @@ def _last_admin_guard(u: dict, new_roles: list[str], new_active: bool) -> None:
             raise HTTPException(400, "Der letzte aktive Administrator kann nicht geändert werden")
 
 
+def _in_my_area(me: Principal, u: dict) -> bool:
+    """Darf ich diesen Benutzer sehen? Globale Admins alle; Bereichs-Admins Benutzer mit einer Zuweisung in ihren Standorten."""
+    if me.is_admin:
+        return True
+    return any(s["site_id"] in me.admin_sites for s in auth.user_scopes(u["id"]))
+
+
+def _fully_mine(me: Principal, u: dict) -> bool:
+    """Gehört der Benutzer ausschließlich zu meinem Verwaltungsbereich (keine globale Rolle, keine fremden Standorte)?
+    Nur dann darf ich ihn sperren, löschen oder sein Passwort zurücksetzen."""
+    if me.is_admin:
+        return True
+    scopes = auth.user_scopes(u["id"])
+    return not auth.parse_roles(u["roles"]) and bool(scopes) and all(s["site_id"] in me.admin_sites for s in scopes)
+
+
+def _user_for(me: Principal, uid: int) -> dict:
+    u = _get_user(uid)
+    if not _in_my_area(me, u):
+        raise HTTPException(404, "Benutzer nicht gefunden")          # Existenz außerhalb des eigenen Bereichs nicht verraten
+    return u
+
+
+def _user_out(me: Principal, u: dict) -> dict:
+    out = auth.public_user(u)
+    if not me.is_admin:                                              # Bereichs-Admins sehen nur Zuweisungen ihrer Standorte
+        out["scopes"] = [s for s in out["scopes"] if s["site_id"] in me.admin_sites]
+        out["limited"] = not _fully_mine(me, u)
+    else:
+        out["limited"] = False
+    return out
+
+
+def _clean_scopes(me: Principal, items) -> list[tuple[str, int]]:
+    """Prüft gewünschte Bereichs-Rechte: bekannte Rolle, vorhandener Standort, bei Bereichs-Admins nur eigene Standorte."""
+    out: list[tuple[str, int]] = []
+    for it in items:
+        if it.role not in auth.ROLES:
+            raise HTTPException(400, f"Unbekannte Rolle: {it.role} (erlaubt: {', '.join(auth.ROLES)})")
+        if not db.row("SELECT id FROM sites WHERE id = ?", (it.site_id,)):
+            raise HTTPException(400, f"Standort {it.site_id} nicht gefunden")
+        if not me.is_admin and it.site_id not in me.admin_sites:
+            raise HTTPException(403, "Rechte dürfen nur für Standorte vergeben werden, für die du Administrator bist")
+        if (it.role, it.site_id) not in out:
+            out.append((it.role, it.site_id))
+    return out
+
+
+def _set_manual_scopes(me: Principal, uid: int, wanted: list[tuple[str, int]]) -> None:
+    """Ersetzt die manuellen Zuweisungen im eigenen Verwaltungsbereich (global: alle); AD-Zuweisungen bleiben unberührt."""
+    cur = db.rows("SELECT id, site_id FROM user_scopes WHERE user_id = ? AND source = 'manual'", (uid,))
+    for r in cur:
+        if me.is_admin or r["site_id"] in me.admin_sites:
+            db.execute("DELETE FROM user_scopes WHERE id = ?", (r["id"],))
+    for role, site_id in wanted:
+        db.execute("INSERT OR IGNORE INTO user_scopes(user_id, role, site_id, source) VALUES (?,?,?, 'manual')", (uid, role, site_id))
+
+
 @router.get("/api/users")
-def list_users(_: Principal = Depends(require_admin)):
-    return [auth.public_user(u) for u in db.rows("SELECT * FROM users ORDER BY username COLLATE NOCASE")]
+def list_users(me: Principal = Depends(require_user_admin)):
+    rows = db.rows("SELECT * FROM users ORDER BY username COLLATE NOCASE")
+    return [_user_out(me, u) for u in rows if _in_my_area(me, u)]
 
 
 @router.post("/api/users", status_code=201)
-def create_user(body: UserCreate, me: Principal = Depends(require_admin)):
+def create_user(body: UserCreate, me: Principal = Depends(require_user_admin)):
     name = body.username.strip()
     if not _NAME_RE.match(name):
         raise HTTPException(400, "Benutzername: 1–64 Zeichen (Buchstaben, Ziffern, . _ - @)")
-    roles = auth.check_roles(body.roles)
+    if body.roles and not me.is_admin:
+        raise HTTPException(403, "Globale Rollen vergeben nur globale Administratoren – bitte Rechte für einen Standort wählen")
+    roles = auth.check_roles(body.roles, allow_empty=True)
+    scopes = _clean_scopes(me, body.scopes)
+    if not roles and not scopes:
+        raise HTTPException(400, "Mindestens eine globale Rolle oder eine Berechtigung für einen Standort ist erforderlich")
     auth.check_password_policy(body.password)
     try:
         uid = db.execute("INSERT INTO users(username, full_name, email, roles, source, password_hash, created_at) VALUES (?,?,?,?,?,?,?)",
                          (name, body.full_name.strip(), body.email.strip(), ",".join(roles), "local", hash_password(body.password), time.time()))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Benutzername existiert bereits")
-    audit.log(me.name, "user.create", "user", uid, f"{name} [{','.join(roles)}]")
-    return auth.public_user(_get_user(uid))
+    _set_manual_scopes(me, uid, scopes)
+    audit.log(me.name, "user.create", "user", uid, f"{name} [{','.join(roles) or '-'}] Standorte: {_scope_text(scopes)}")
+    return _user_out(me, _get_user(uid))
+
+
+def _scope_text(scopes) -> str:
+    return ", ".join(f"{r}@{s}" for r, s in scopes) or "-"
 
 
 @router.put("/api/users/{uid}")
-def update_user(uid: int, body: UserUpdate, me: Principal = Depends(require_admin)):
-    u = _get_user(uid)
-    roles = auth.check_roles(body.roles) if body.roles is not None else auth.parse_roles(u["roles"])
+def update_user(uid: int, body: UserUpdate, me: Principal = Depends(require_user_admin)):
+    u = _user_for(me, uid)
+    old_roles = auth.parse_roles(u["roles"])
+    if body.roles is not None and not me.is_admin and sorted(body.roles) != sorted(old_roles):
+        raise HTTPException(403, "Globale Rollen ändern nur globale Administratoren")
+    roles = auth.check_roles(body.roles, allow_empty=True) if body.roles is not None else old_roles
     active = body.active if body.active is not None else bool(u["active"])
+    if active != bool(u["active"]) and not _fully_mine(me, u):
+        raise HTTPException(403, "Dieser Benutzer gehört auch zu anderen Bereichen – Sperren nur durch globale Administratoren")
     _last_admin_guard(u, roles, active)
+    wanted = _clean_scopes(me, body.scopes) if body.scopes is not None else None
     db.execute("UPDATE users SET roles=?, active=?, full_name=?, email=? WHERE id=?",
                (",".join(roles), 1 if active else 0, body.full_name.strip() if body.full_name is not None else u["full_name"],
                 body.email.strip() if body.email is not None else u["email"], uid))
-    if not active or roles != auth.parse_roles(u["roles"]):
+    if wanted is not None:
+        _set_manual_scopes(me, uid, wanted)
+    if u["source"] == "local" and not roles and not auth.user_scopes(uid):
+        raise HTTPException(400, "Mindestens eine globale Rolle oder eine Berechtigung für einen Standort ist erforderlich")
+    if not active or roles != old_roles:
         auth.revoke_sessions(uid)                                # neue Rechte gelten sofort
-    audit.log(me.name, "user.update", "user", uid, f"{u['username']} [{','.join(roles)}] aktiv={active}")
-    return auth.public_user(_get_user(uid))
+    audit.log(me.name, "user.update", "user", uid,
+              f"{u['username']} [{','.join(roles) or '-'}] aktiv={active}" + (f" Standorte: {_scope_text(wanted)}" if wanted is not None else ""))
+    return _user_out(me, _get_user(uid))
 
 
 @router.post("/api/users/{uid}/reset-password")
-def reset_password(uid: int, body: PasswordReset, me: Principal = Depends(require_admin)):
-    u = _get_user(uid)
+def reset_password(uid: int, body: PasswordReset, me: Principal = Depends(require_user_admin)):
+    u = _user_for(me, uid)
+    if not _fully_mine(me, u):
+        raise HTTPException(403, "Dieser Benutzer gehört auch zu anderen Bereichen – nur globale Administratoren dürfen das")
     if u["source"] != "local":
         raise HTTPException(400, "Verzeichnisdienst-Benutzer haben kein lokales Passwort")
     auth.check_password_policy(body.new_password)
@@ -122,18 +204,22 @@ def reset_password(uid: int, body: PasswordReset, me: Principal = Depends(requir
 
 
 @router.post("/api/users/{uid}/revoke-sessions")
-def revoke_user_sessions(uid: int, me: Principal = Depends(require_admin)):
-    u = _get_user(uid)
+def revoke_user_sessions(uid: int, me: Principal = Depends(require_user_admin)):
+    u = _user_for(me, uid)
+    if not _fully_mine(me, u):
+        raise HTTPException(403, "Dieser Benutzer gehört auch zu anderen Bereichen – nur globale Administratoren dürfen das")
     auth.revoke_sessions(uid)
     audit.log(me.name, "user.revoke_sessions", "user", uid, u["username"])
     return {"ok": True}
 
 
 @router.delete("/api/users/{uid}")
-def delete_user(uid: int, me: Principal = Depends(require_admin)):
-    u = _get_user(uid)
+def delete_user(uid: int, me: Principal = Depends(require_user_admin)):
+    u = _user_for(me, uid)
     if u["id"] == me.user_id:
         raise HTTPException(400, "Das eigene Konto kann nicht gelöscht werden")
+    if not _fully_mine(me, u):
+        raise HTTPException(403, "Dieser Benutzer gehört auch zu anderen Bereichen – nur globale Administratoren dürfen ihn löschen")
     _last_admin_guard(u, [], False)
     auth.revoke_sessions(uid)
     db.execute("DELETE FROM users WHERE id = ?", (uid,))

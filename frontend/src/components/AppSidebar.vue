@@ -12,10 +12,21 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
         </svg>
       </button>
+      <img src="/logo.svg" alt="" class="w-7 h-7 flex-shrink-0" />
       <div v-show="!collapsed" class="leading-tight min-w-0 overflow-hidden">
-        <div class="text-white font-bold text-sm tracking-wide whitespace-nowrap">OpenPatchPlanning</div>
+        <div class="text-white font-bold text-sm tracking-wide whitespace-nowrap">Portwerk</div>
         <div class="text-white/40 text-[9px] tracking-widest uppercase whitespace-nowrap">Patchplanung</div>
       </div>
+    </div>
+
+    <!-- Schnellsuche -->
+    <div class="px-1.5 pt-2">
+      <button @click="$emit('open-search')" :title="'Suche (Strg+K oder /)'"
+        class="w-full flex items-center gap-2 rounded-lg bg-white/10 hover:bg-white/20 text-white/70 hover:text-white transition-colors px-2.5 py-1.5 text-sm">
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z"/></svg>
+        <span v-show="!collapsed" class="flex-1 text-left whitespace-nowrap">Suchen …</span>
+        <kbd v-show="!collapsed" class="text-[10px] text-white/40 border border-white/20 rounded px-1">Strg K</kbd>
+      </button>
     </div>
 
     <!-- Navigation -->
@@ -71,10 +82,10 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import NavLink from './SidebarNavLink.vue'
-import { api, clearToken, isAdmin, hasRole, getUser } from '../api.js'
+import { api, clearToken, isAdmin, hasRole, canAdministerUsers, getUser } from '../api.js'
 import { roleLabel } from '../ui.js'
 
-defineEmits(['open-profile', 'toggle-help'])
+defineEmits(['open-profile', 'toggle-help', 'open-search'])
 const router = useRouter()
 const collapsed = ref(false)
 const isDark = ref(false)
@@ -86,6 +97,9 @@ const IC = {
   site:   'M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0zM15 11a3 3 0 11-6 0 3 3 0 016 0z',
   device: 'M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01',
   rack:   'M4 6h16M4 10h16M4 14h16M4 18h16M7 4v16M17 4v16',
+  catalog: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10',
+  compare: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z',
+  wan:    'M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
   order:  'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4',
   import: 'M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12',
   admin:  'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
@@ -96,12 +110,16 @@ const allLinks = [
   { to: '/sites',       label: 'Standorte',   icon: IC.site,   desc: 'Standorte, Gebäude, Räume und Racks' },
   { to: '/devices',     label: 'Geräte',      icon: IC.device, desc: 'Geräte mit Ports, Patchfelder und Dosen' },
   { to: '/racks',       label: 'Racks',       icon: IC.rack,   desc: 'Schrankansicht mit Höheneinheiten' },
+  { to: '/compare',     label: 'Soll/Ist',    icon: IC.compare, desc: 'Dokumentierte Verkabelung gegen LLDP/CDP-Nachbarn abgleichen' },
+  { to: '/wan',         label: 'WAN',         icon: IC.wan,    desc: 'WAN-Verbindungen: Provider, Leitungen, Verträge' },
+  { to: '/catalog',     label: 'Katalog',     icon: IC.catalog, desc: 'Gerätemodelle mit Port-Vorlagen und Kabelarten' },
   { to: '/workorders',  label: 'Patchaufträge', icon: IC.order, desc: 'Patchaufträge planen, freigeben und ausführen', roleAny: ['planer','freigeber','techniker','viewer','admin'] },
   { to: '/import',      label: 'Import',      icon: IC.import, desc: 'Geräte und Ports aus CSV, JSON oder Checkmk importieren', adminOnly: true },
-  { to: '/admin',       label: 'Verwaltung',  icon: IC.admin,  desc: 'Benutzer, API-Zugänge und Audit-Log', adminOnly: true },
+  { to: '/admin',       label: 'Verwaltung',  icon: IC.admin,  desc: 'Benutzer und Rechte, API-Zugänge, AD-Anmeldung, Zertifikat und Audit-Log', userAdmin: true },
 ]
 const visibleLinks = computed(() => allLinks.filter(l => {
   if (l.adminOnly) return isAdmin()
+  if (l.userAdmin) return canAdministerUsers()
   if (l.roleAny)   return isAdmin() || hasRole(...l.roleAny)
   return true
 }))

@@ -9,7 +9,10 @@
           <h1 class="text-lg font-semibold text-slate-800 dark:text-slate-100">{{ d.hostname }}</h1>
           <p class="text-xs text-slate-400">{{ typeLabel(d.type) }} · {{ sourceLabel(d.source) }}<span v-if="d.ext_id"> · Quell-ID {{ d.ext_id }}</span></p>
         </div>
-        <button v-if="canWrite" :class="btnDanger" @click="removeDevice">Gerät löschen</button>
+        <div class="flex gap-3 items-center">
+          <a v-if="checkmkUrl(d)" :href="checkmkUrl(d)" target="_blank" rel="noopener" :class="btnLink">In Checkmk öffnen ↗</a>
+          <button v-if="canWrite" :class="btnDanger" @click="removeDevice">Gerät löschen</button>
+        </div>
       </div>
 
       <div :class="card" class="p-4">
@@ -31,6 +34,9 @@
           <div class="grid grid-cols-2 gap-2">
             <div><label :class="lbl">HE-Position</label><input v-model.number="form.rack_position" type="number" min="1" :class="inp" :disabled="!canWrite" /></div>
             <div><label :class="lbl">Höhe (HE)</label><input v-model.number="form.height_u" type="number" min="1" max="50" :class="inp" :disabled="!canWrite" /></div>
+            <div><label :class="lbl">Einbau</label><select v-model="form.orientation" :class="inp" :disabled="!canWrite" @change="if (form.orientation === 'vertical') { if (form.mount_side === 'both') form.mount_side = 'rear'; if (!form.side_slot) form.side_slot = 'left' } else form.side_slot = ''"><option value="horizontal">19 Zoll (HE)</option><option value="vertical">Hochkant (Seitenkanal)</option><option value="din_rail">Hutschiene / Montageplatte</option></select></div>
+            <div><label :class="lbl">Einbauseite</label><select v-model="form.mount_side" :class="inp" :disabled="!canWrite"><option value="front">Vorderseite</option><option value="rear">Rückseite</option><option v-if="form.orientation === 'horizontal'" value="both">beide Seiten</option></select></div>
+            <div v-if="form.orientation === 'vertical'"><label :class="lbl">Seitenkanal</label><select v-model="form.side_slot" :class="inp" :disabled="!canWrite"><option value="left">links</option><option value="right">rechts</option></select></div>
           </div>
           <div class="md:col-span-3"><label :class="lbl">Notiz</label><input v-model="form.note" :class="inp" :disabled="!canWrite" /></div>
         </div>
@@ -42,6 +48,7 @@
           <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Ports ({{ d.ports.length }})</h2>
           <div v-if="canWrite" class="flex gap-2">
             <button :class="btnGhost" @click="openBulk">Mehrere anlegen</button>
+            <button :class="btnGhost" @click="startCable(null)">Kabel-Assistent</button>
             <button :class="btnPrimary" @click="openPort()">+ Port</button>
           </div>
         </div>
@@ -73,6 +80,7 @@
                   <button :class="btnLink" @click="openPort(p)">Bearbeiten</button>
                   <button v-if="d.type === 'patchpanel'" :class="btnLink" class="ml-3" @click="openPeer(p)">Gegenseite</button>
                   <button :class="btnLink" class="ml-3" @click="openLink(p)">Verbindung</button>
+                  <button v-if="!p.cable" :class="btnLink" class="ml-3" @click="startCable(p)">Kabel-Assistent</button>
                   <button :class="btnDanger" class="ml-3" @click="removePort(p)">Löschen</button>
                 </td>
               </tr>
@@ -147,11 +155,11 @@
           </div>
           <div><label :class="lbl">Kabeltyp</label>
             <select v-model="cableForm.cable_type" :class="inp">
-              <option v-for="t in CABLE_TYPES" :key="t" :value="t">{{ t }}</option>
+              <option v-for="t in cableTypes" :key="t.name" :value="t.name">{{ t.name }}</option>
             </select>
           </div>
-          <div v-if="cableForm.cable_type.startsWith('LWL')">
-            <label :class="lbl">Faseranzahl</label>
+          <div v-if="countLabel(cableForm.cable_type)">
+            <label :class="lbl">{{ countLabel(cableForm.cable_type) }}</label>
             <input v-model.number="cableForm.fiber_count" type="number" min="1" :class="inp" placeholder="z.B. 4" />
           </div>
           <div><label :class="lbl">Länge (m)</label>
@@ -201,6 +209,7 @@
         <button @click="savePeer" :class="btnPrimary">Speichern</button>
       </template>
     </ModalDialog>
+    <CableWizard v-if="cableWiz" :preset-device-id="cableWiz.deviceId" :preset-port-id="cableWiz.portId" @close="cableWiz = null" @done="cableDone" />
   </div>
 </template>
 
@@ -208,19 +217,25 @@
 import { ref, reactive, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ModalDialog from '../components/ModalDialog.vue'
+import CableWizard from '../components/CableWizard.vue'
 import HelpHint from '../components/HelpHint.vue'
-import { api, errText, isAdmin } from '../api.js'
+import { cableTypes, countLabel, loadCableTypes } from '../catalog.js'
+import { api, errText, canWriteMaster } from '../api.js'
+import { checkmkUrl, loadCheckmk } from '../checkmk.js'
 import { inp, lbl, card, th, td, btnPrimary, btnGhost, btnDanger, btnLink, DEVICE_TYPES, DEVICE_STATUS, PORT_MEDIA,
-         CABLE_TYPES, typeLabel, sourceLabel, fmtSpeed, linkClass } from '../ui.js'
+         typeLabel, sourceLabel, fmtSpeed, linkClass } from '../ui.js'
 
 const route = useRoute(), router = useRouter()
-const canWrite = isAdmin()
+const canWrite = canWriteMaster()
 const d = ref(null), locations = ref([])
 const form = reactive({})
 const error = ref(''), msg = ref(''), msgErr = ref(false), formError = ref('')
 const portForm = ref(null), bulk = ref(null), peer = ref(null), cableForm = ref(null)
+const cableWiz = ref(null)
+function startCable(p) { cableWiz.value = { deviceId: d.value.id, portId: p ? p.id : null } }
+async function cableDone(r) { cableWiz.value = null; msgErr.value = false; msg.value = r.workorder ? `Kabel als Position in ${r.workorder.number} angelegt.` : 'Kabel angelegt.'; await load() }
 
-const FIELDS = ['hostname', 'type', 'vendor', 'model', 'serial', 'mgmt_ip', 'location_id', 'rack_position', 'height_u', 'status', 'note']
+const FIELDS = ['hostname', 'type', 'vendor', 'model', 'serial', 'mgmt_ip', 'location_id', 'rack_position', 'height_u', 'status', 'note', 'mount_side', 'orientation', 'side_slot']
 
 async function load() {
   try {
@@ -323,6 +338,6 @@ async function savePeer() {
   catch (e) { formError.value = errText(e) }
 }
 
-onMounted(async () => { try { locations.value = await api.locations() } catch {} ; load() })
+onMounted(async () => { loadCableTypes(); loadCheckmk(); try { locations.value = await api.locations() } catch {} ; load() })
 watch(() => route.params.id, id => { if (id) load() })
 </script>

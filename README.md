@@ -1,4 +1,4 @@
-# OpenPatchPlanning
+# Portwerk
 
 Verwaltung und Planung von **Verkabelung/Patchungen** (Switchport ↔ Patchfeld ↔ Dose ↔ Endgerät) im Browser.
 Schlank (ein Container: FastAPI + SQLite, Vue 3 + Tailwind), deutsche Oberfläche.
@@ -16,7 +16,7 @@ Per **Soll/Ist-Abgleich** (LLDP) wird geprüft, ob die dokumentierte Verbindung 
 
 ```bash
 docker compose up -d --build         # Oberfläche und API unter http://localhost:8084
-docker compose logs openpatchplanning | grep -i passwort    # Start-Passwort, wenn OPP_ADMIN_PASSWORD leer war
+docker compose logs portwerk | grep -i passwort    # Start-Passwort, wenn OPP_ADMIN_PASSWORD leer war
 ```
 
 Die Daten liegen im Volume `opp-data` (SQLite). Hinter einem TLS-inspizierenden Proxy müssen die Proxy-CA-Zertifikate beim Build bekannt sein.
@@ -47,3 +47,8 @@ Konfiguration über Umgebungsvariablen (Präfix `OPP_`): `OPP_DATA_DIR` (SQLite,
 ## Lizenz
 
 MIT – siehe [LICENSE](LICENSE).
+
+## WAN-Verbindungen
+
+Das Menü „WAN“ führt das Leitungsverzeichnis (Provider, Leitungs-ID, Technik, Bandbreite, Vertrag, Endpunkte mit optionalem Port). Inbetriebnahme, Änderung und
+Kündigung laufen als Positionen in Patchaufträgen (`wan_activate`, `wan_change`, `wan_terminate`); der Bestand ändert sich beim Bestätigen. API: `/api/wan`.
